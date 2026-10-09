@@ -19,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-注意：本许可证仅覆盖本仓库的**代码**。
-
-仓库中的角色插画（whalegirl.png）、应用图标（lyrics-display-logo.*）与测试用专辑封面
-（test_cover.jpg）均为**第三方素材**，其著作权不属于本项目作者，不在上述 MIT 授权范围内。
-若你要再分发或商用，请自行取得原作者许可。
-
-Note: this license covers the source code only. The character artwork
-(whalegirl.png), the application icons (lyrics-display-logo.*) and the test
-album cover (test_cover.jpg) are third-party assets whose copyright belongs to
-their respective authors and are NOT covered by the MIT grant above. Obtain
-permission from the original authors before redistributing or using them
-commercially.

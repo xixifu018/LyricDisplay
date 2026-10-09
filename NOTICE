@@ -1,0 +1,33 @@
+# 第三方素材声明 / Third-Party Assets Notice
+
+本仓库的**代码**采用 [MIT 许可](LICENSE)。
+
+但仓库中包含的部分**图片素材**著作权不属于本项目作者，**不在 MIT 授权范围内**：
+
+| 文件 | 用途 | 说明 |
+|------|------|------|
+| `whalegirl.png` | 插件中的角色形象（构建时裁剪并内嵌为 data URL） | 角色插画，非本项目作者创作 |
+| `lyrics-display-logo.png` | 应用图标 | 同上 |
+| `lyrics-display-logo.ico` | 打包为 exe 时的图标（`LyricDisplay.spec` 引用） | 由上述图标转换 |
+| `test_cover.jpg` | 封面显示功能的测试图 | 专辑封面 |
+
+**若你要再分发、商用或修改后发布本项目，请自行取得这些素材原作者的许可。**
+仅使用本项目的代码而不使用上述素材时，不受此限制。
+
+---
+
+The **source code** in this repository is licensed under the [MIT License](LICENSE).
+
+However, some **image assets** are the property of their respective authors and
+are **NOT covered by the MIT grant**:
+
+| File | Purpose |
+|------|---------|
+| `whalegirl.png` | Character artwork used by the plugin (cropped and embedded as a data URL at build time) |
+| `lyrics-display-logo.png` | Application icon |
+| `lyrics-display-logo.ico` | Icon used when packaging the exe |
+| `test_cover.jpg` | Test image for the cover-display feature |
+
+**If you intend to redistribute, use commercially, or republish this project,
+obtain permission from the original authors of these assets first.**
+If you use only the source code without these assets, this restriction does not apply.

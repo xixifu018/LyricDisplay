@@ -188,7 +188,7 @@ round_cover.py
 
 > ⚠️ 仓库中的角色插画 `whalegirl.png`、应用图标 `lyrics-display-logo.*` 与测试用专辑封面
 > `test_cover.jpg` 是**第三方素材**，著作权不属于本项目作者，**不在 MIT 授权范围内**。
-> 再分发或商用前请自行取得原作者许可。
+> 详见 [NOTICE](NOTICE)。再分发或商用前请自行取得原作者许可。
 
 ---
 
