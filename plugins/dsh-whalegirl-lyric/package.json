@@ -1,0 +1,30 @@
+{
+  "name": "dsh-whalegirl-lyric",
+  "version": "1.0.0",
+  "private": true,
+  "description": "鲸鱼娘·洛雪歌词挂件：在 DSH Web GUI 里显示洛雪音乐的歌词气泡（鲸鱼娘唱歌形象）并可控制播放。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "external": []
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.0-rc.1"
+  },
+  "license": "MIT"
+}

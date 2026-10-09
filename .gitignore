@@ -1,0 +1,35 @@
+# ---- 构建产物 ----
+# 注意前导 `/`：这些模式只匹配**仓库根目录**下的 build/dist。
+# 写成 `build/`（无前导斜杠）会匹配任意层级，把 plugins/*/build/ 这样的**源码目录**也一起忽略掉。
+#
+# PyInstaller 的 build/ 里会生成 .toc / xref 元数据，其中**内嵌构建机的绝对路径与用户名**
+# （例如 C:\Users\<用户名>\AppData\...），不应提交。
+/build/
+/dist/
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 本地配置：含本机专有路径，不提交 ----
+# 源码目录的配置（settings.py 会在 exe/源码同目录生成 settings.json）
+settings.json
+# dist/ 已被忽略，这里再显式声明一次以免将来 dist/ 改名后漏掉
+dist/settings.json
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 说明 ----
+# 以下文件是**必需资源**，不要忽略（构建脚本会读取它们）：
+#   whalegirl.png            — 插件构建时裁剪并内嵌为 data URL
+#   lyrics-display-logo.png  — 应用图标
+#   lyrics-display-logo.ico  — exe 图标（.spec 引用）
+#   test_cover.jpg           — 封面加载测试图

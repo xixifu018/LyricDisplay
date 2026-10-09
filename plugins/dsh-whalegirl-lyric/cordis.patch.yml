@@ -1,0 +1,13 @@
+# dsh-whalegirl-lyric —— 一个聚合包层，向 Loader 树插入本插件的两个半边。
+#
+# Host 半边（lib/index.js）负责轮询洛雪音乐 API 并通过 Web 路由对外提供状态；
+# Client 半边由 package.json 的 dsh.client 声明，经 /plugins 提供给浏览器。
+
+- insert:
+    - id: whalegirl-lyric
+      name: 'dsh-whalegirl-lyric'
+      config:
+        host: 127.0.0.1
+        port: 23330
+        lyrics: true
+        translation: true
