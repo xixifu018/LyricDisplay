@@ -36,6 +36,21 @@
 
 3. **重启 DeepSeek Harness**，然后刷新浏览器页面。
 
+> **不要从插件源码目录直接 `import` 测试。** 插件依赖 `schemastery`（校验配置 schema 用），
+> 它由**宿主运行时**提供，只存在于 profile 的 `node_modules` 下：
+>
+> ```sh
+> # 在插件源码目录里这样做会失败：
+> node -e "import('./lib/index.js')"
+> #   Error: Cannot find package 'schemastery'
+>
+> # 必须装进 profile 后，从 profile 目录导入：
+> cd <profile 目录>
+> node -e "import('dsh-whalegirl-lyric').then(m => console.log(m.Config({})))"
+> ```
+>
+> 这一点容易误导排查：看到 `Cannot find package` 很可能以为插件写错了，其实只是没装在宿主里。
+
 > `dsh.profile.bundles` 里的名字既用于解析包，也用于应用该包 `dsh.bundle.patch` 指向的 patch 文件 —— 后者负责把插件行插入 Loader 树。
 >
 > **不要**再往 profile 自己的 `cordis.patch.yml` 里手写同样的 insert：两处都写会在重启时重复插入同一行。
