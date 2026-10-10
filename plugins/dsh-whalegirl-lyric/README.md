@@ -316,7 +316,46 @@ DSH 的客户端 bundle 是 **CJS factory 模型**，由 `window.__ModuleLoader_
 | 用 junction / 软链接装，报 `Cannot find package 'schemastery'` | Node 解析软链接的 realpath，去了仓库目录找宿主依赖。**必须复制实体目录** |
 | 装好后插件毫无反应，文件都在 | `package.json` 的 `dsh.profile.bundles` 里漏了本包名 → patch 未应用、插件行未插入 Loader 树 |
 | 装好后重启仍不出现 | 确认重启了 **DeepSeek Harness 本体**（不是只刷新页面）；Host 侧改动必须重启 |
-| 插件管理器安装报 `ERR_PNPM_UNEXPECTED_STORE` | profile 的 `node_modules` 由**旧版 pnpm** 安装（如 pnpm 10），而运行时自带 pnpm 11。两个大版本的 store 格式不兼容（索引从 JSON 变为 SQLite），且 pnpm 11 强制使用自己的 `store/v11`，**无法靠 `store-dir` 配置绕过**。处理：用当前运行时的 pnpm 重装 profile 依赖 |
+| 插件管理器安装报 `ERR_PNPM_UNEXPECTED_STORE` | profile 的 `node_modules` 由**旧版 pnpm** 安装（如 pnpm 10），而运行时自带 pnpm 11。两个大版本的 store 格式不兼容（索引从 JSON 变为 SQLite），且 pnpm 11 强制使用自己的 `store/v11`，**无法靠 `store-dir` 配置绕过**。处理：用当前运行时的 pnpm 重建 profile 依赖，见下 |
+
+### 重建 profile 依赖（修 `ERR_PNPM_UNEXPECTED_STORE`）
+
+仓库里有现成脚本：`build/fix-profile-store.ps1`（备份 → 重建 → 校验 → 按包名安装插件 → 注册 bundle → 校验可解析性，失败自动回滚）。
+
+```powershell
+# 必须先完全退出 DeepSeek Harness，否则会 EPERM
+powershell -ExecutionPolicy Bypass -File "<仓库路径>\plugins\dsh-whalegirl-lyric\build\fix-profile-store.ps1"
+```
+
+> **为什么必须先关掉 DSH**：重建的第一步是删空 `node_modules`，而 `lightningcss` 的
+> Windows 原生模块（`.node` 即 DLL）在 DSH 运行时被进程加载并锁定。Windows 拒绝删除
+> 已加载的 DLL，重建会以 `EPERM: operation not permitted, unlink ...lightningcss.win32-x64-msvc.node`
+> 中止。脚本第 0 步会强制检查并把 DSH 是否在跑作为前置条件 —— **这一步不能省，也不能绕**。
+>
+> 顺带一提：非交互环境（无 TTY）下 pnpm 还会拒绝清空重建，需 `CI=true`；脚本已内置。
+
+> 该脚本刻意写成**纯 ASCII**。原因：Windows PowerShell 5.1 按系统 ANSI 代码页（中文系统是 GBK）
+> 解码 `.ps1`，UTF-8 无 BOM 的中文会变乱码、吃掉引号，导致整个脚本无法解析：
+> `表达式或语句中包含意外的标记 }` / `字符串缺少终止符`。
+> 用 PowerShell 7（`pwsh`）验证语法**发现不了**这个问题，因为它默认按 UTF-8 读 —— 必须用
+> `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` 验证。
+
+### 包名安装前后的四项一致性
+
+装完（无论走 GUI 还是命令行）应确认这四处**同时**成立，缺一项就会出现「文件都在但插件没反应」或「Loader 报 cannot resolve profile bundle」：
+
+```powershell
+$prof = "C:\Users\lys13\.dsh\profiles\desktop"
+$p = Get-Content "$prof\package.json" -Raw | ConvertFrom-Json
+@{
+  dependencies = @($p.dependencies.PSObject.Properties.Name) -contains 'dsh-whalegirl-lyric'
+  bundles      = @($p.dsh.profile.bundles) -contains 'dsh-whalegirl-lyric'
+  node_modules = Test-Path "$prof\node_modules\dsh-whalegirl-lyric"
+  lockfile     = (Select-String "$prof\pnpm-lock.yaml" -Pattern whalegirl -Quiet) -eq $true
+} | Format-Table
+```
+
+`pnpm add` 会自动写 `dependencies` 与 lockfile，但**不会**把包名加进 `dsh.profile.bundles` —— 那一项必须另外加。
 
 ### 运行类
 
