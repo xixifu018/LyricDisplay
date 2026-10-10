@@ -203,3 +203,30 @@ round_cover.py
 
 它与 `LyricDisplay` 共用同一套洛雪 API 对接思路（含 LRC 解析与端点映射），但运行环境完全不同：
 一个是 PyQt5 原生窗口，另一个是浏览器里的插件 bundle。
+
+### 安装
+
+插件已发布到 npm，在 DSH 里**一条命令即可安装**：
+
+```
+dsh-whalegirl-lyric
+```
+
+**用 GUI**：设置 →「插件」→ 安装 → 填入上面的包名。
+
+**用命令行**：
+
+```sh
+cd ~/.dsh/profiles/<profile 名称>
+pnpm add dsh-whalegirl-lyric
+```
+
+> ⚠️ 无论用哪种方式，都要再确认 `package.json` 的 `dsh.profile.bundles` 里**含有**
+> `"dsh-whalegirl-lyric"`。`pnpm add` 只写 `dependencies` 与 lockfile，**不会**动 `bundles`；
+> 缺了这一项，插件会「文件都在但毫无反应」。安装后重启 DeepSeek Harness 并刷新页面。
+
+> 若安装时报 `ERR_PNPM_UNEXPECTED_STORE`，是 profile 的 `node_modules` 由旧版 pnpm 安装、
+> 与运行时自带的新版 pnpm 的 store 格式不兼容所致，与插件本身无关。
+> 修复脚本见插件 README 的[故障排查](plugins/dsh-whalegirl-lyric/README.md#重建-profile-依赖修-err_pnpm_unexpected_store)章节。
+
+npm 页面：https://www.npmjs.com/package/dsh-whalegirl-lyric
