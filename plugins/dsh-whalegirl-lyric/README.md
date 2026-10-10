@@ -22,9 +22,26 @@
 
 ## 安装
 
+### 方式一：按包名安装（已发布到 npm）
+
+```sh
+pnpm add dsh-whalegirl-lyric
+```
+
+然后在 profile 的 `package.json` 里把包名加入 bundle 列表：
+
+```json
+{ "dsh": { "profile": { "bundles": ["...", "dsh-whalegirl-lyric"] } } }
+```
+
+> **`bundles` 里必须有一项**，否则包的 `cordis.patch.yml` 不会被应用、插件行不会插入 Loader 树。
+> 症状是「文件都在，插件却没反应」。
+
+### 方式二：从本地源码安装
+
 在 profile 目录（`~/.dsh/profiles/<名称>/`）：
 
-1. 把本包放进 `node_modules/`
+1. 把本包**复制**进 `node_modules/`
 2. 在 `package.json` 里声明依赖并加入 bundle 列表：
 
 ```json
@@ -34,7 +51,28 @@
 }
 ```
 
+开发时用仓库里的同步脚本，避免忘掉复制这一步：
+
+```sh
+node build/sync-profile.mjs              # 同步到默认 profile（desktop）
+node build/sync-profile.mjs <profile 名>  # 指定 profile
+node build/sync-profile.mjs --dry-run    # 只看会复制什么
+```
+
 3. **重启 DeepSeek Harness**，然后刷新浏览器页面。
+
+> **为什么第 1 步必须「复制」而不能用软链接 / junction？**
+>
+> Node 的 ESM 解析器**默认解析符号链接的 realpath**。若用 junction 指向源码目录，
+> `import 'schemastery'` 会去**源码所在仓库**的 `node_modules` 链里找，而那里没有这个包。
+> 报错里的路径指向仓库而不是 profile，极易误判为插件写错：
+>
+> ```
+> Cannot find package 'schemastery' imported from
+> D:\...\plugins\dsh-whalegirl-lyric\lib\index.js    ← 是仓库路径，说明走了 realpath
+> ```
+>
+> 因此必须复制实体目录 —— profile 里其他插件（`@deepseek-ai/*`、`@linxin666/*`）也都是实体目录。
 
 > **不要从插件源码目录直接 `import` 测试。** 插件依赖 `schemastery`（校验配置 schema 用），
 > 它由**宿主运行时**提供，只存在于 profile 的 `node_modules` 下：
@@ -50,6 +88,7 @@
 > ```
 >
 > 这一点容易误导排查：看到 `Cannot find package` 很可能以为插件写错了，其实只是没装在宿主里。
+> （发布到 npm 时 `schemastery` 已声明为 `dependency`，所以按包名安装时它会被一并装上。）
 
 > `dsh.profile.bundles` 里的名字既用于解析包，也用于应用该包 `dsh.bundle.patch` 指向的 patch 文件 —— 后者负责把插件行插入 Loader 树。
 >
@@ -269,15 +308,50 @@ DSH 的客户端 bundle 是 **CJS factory 模型**，由 `window.__ModuleLoader_
 
 ## 故障排查
 
+### 安装类
+
+| 现象 | 原因与处理 |
+|------|-----------|
+| 按包名安装报 404 / 找不到包 | 本插件需已发布到 npm。未发布时只能走本地源码安装（见「安装」） |
+| 用 junction / 软链接装，报 `Cannot find package 'schemastery'` | Node 解析软链接的 realpath，去了仓库目录找宿主依赖。**必须复制实体目录** |
+| 装好后插件毫无反应，文件都在 | `package.json` 的 `dsh.profile.bundles` 里漏了本包名 → patch 未应用、插件行未插入 Loader 树 |
+| 装好后重启仍不出现 | 确认重启了 **DeepSeek Harness 本体**（不是只刷新页面）；Host 侧改动必须重启 |
+| 插件管理器安装报 `ERR_PNPM_UNEXPECTED_STORE` | profile 的 `node_modules` 由**旧版 pnpm** 安装（如 pnpm 10），而运行时自带 pnpm 11。两个大版本的 store 格式不兼容（索引从 JSON 变为 SQLite），且 pnpm 11 强制使用自己的 `store/v11`，**无法靠 `store-dir` 配置绕过**。处理：用当前运行时的 pnpm 重装 profile 依赖 |
+
+### 运行类
+
 | 现象 | 原因与处理 |
 |------|-----------|
 | 挂件完全不出现 | 浏览器 F12 看 Console 是否有 `[dsh-whalegirl-lyric]` 报错；确认已重启 + 硬刷新（Ctrl+Shift+R） |
+| 只看到右下角一个小胶囊 | 之前点过 `×` 收起了。状态存在 localStorage，**重装不会清除**。点胶囊展开，或删掉 `dsh-whalegirl-lyric:hidden` 后刷新 |
 | 气泡显示「未连接到洛雪音乐」 | 洛雪没开开放 API，或 `host`/`port` 配置不对。先 `curl http://127.0.0.1:23330/status` 确认 |
 | 上一首 / 下一首无反应 | 端点必须是 `/skip-prev` `/skip-next`。写成 `/next` `/prev` 会静默拿到 401 |
+| 歌词只有一行「纯音乐，请欣赏」 | 该曲目本身是纯音乐，没有歌词。换一首有人声歌词的歌即可，不是 bug |
 | 歌词卡住不动 | 检查 LRC 是否含单位小数时间标签（如 `[00:09.6]`）；解析器已覆盖 1~3 位小数 |
 | 封面显示占位方块 | 图床防盗链或网络失败。封面代理已做同源中转与单首缓存，仍失败则退化为占位 |
 | 翻译歌词一直为空 | 歌曲本身没有翻译，或该曲源的 `tlyric` 为空；可关掉 `translation` 省一次请求 |
 | 改了配置不生效 | 保存后 Loader 会重挂条目；若无效请确认改的是插件条目的 config，而不是别处 |
+
+### 排查用的 localStorage 键
+
+插件把界面状态记在这三个键里，**重装插件不会清除**，排查「看不到挂件」时先看它们：
+
+```
+dsh-whalegirl-lyric:hidden    = '1' → 收成了胶囊
+dsh-whalegirl-lyric:compact   = '1' → 控制区收起（这是默认值）
+dsh-whalegirl-lyric:pos       → 拖动位置
+```
+
+在浏览器 Console 里：
+
+```js
+// 查看当前状态
+Object.fromEntries(Object.entries(localStorage).filter(([k]) => k.includes('whalegirl')))
+
+// 恢复默认显示
+Object.keys(localStorage).filter(k => k.includes('whalegirl')).forEach(k => localStorage.removeItem(k));
+location.reload()
+```
 
 ## 已知限制
 
@@ -290,4 +364,8 @@ DSH 的客户端 bundle 是 **CJS factory 模型**，由 `window.__ModuleLoader_
 
 ## 许可
 
-MIT
+代码采用 [MIT](LICENSE) 许可。
+
+> ⚠️ 插件中的角色形象来自仓库根目录的 `whalegirl.png`（构建时裁剪并内嵌为 data URL），
+> 该插画为**第三方素材**，著作权不属于本项目作者，**不在 MIT 授权范围内**。
+> 再分发或商用前请自行取得原作者许可，详见仓库根目录的 [NOTICE](../../NOTICE)。
