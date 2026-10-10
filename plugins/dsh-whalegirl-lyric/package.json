@@ -1,8 +1,8 @@
 {
   "name": "dsh-whalegirl-lyric",
   "version": "1.0.0",
-  "private": true,
-  "description": "鲸鱼娘·洛雪歌词挂件：在 DSH Web GUI 里显示洛雪音乐的歌词气泡（鲸鱼娘唱歌形象）并可控制播放。",
+  "description": "DSH Web GUI 插件：鲸鱼娘形象 + 洛雪音乐歌词气泡，支持播放控制与 SSE 即时同步。",
+  "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -10,6 +10,29 @@
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "lx-music",
+    "lyrics",
+    "desktop-lyrics",
+    "whalegirl"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xixifu018/LyricDisplay.git",
+    "directory": "plugins/dsh-whalegirl-lyric"
+  },
+  "bugs": {
+    "url": "https://github.com/xixifu018/LyricDisplay/issues"
+  },
+  "homepage": "https://github.com/xixifu018/LyricDisplay/tree/main/plugins/dsh-whalegirl-lyric#readme",
   "dsh": {
     "manifestVersion": 1,
     "engines": {
@@ -23,8 +46,10 @@
       "external": []
     }
   },
+  "dependencies": {
+    "schemastery": "^3.18.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh": ">=0.2.0-rc.1"
-  },
-  "license": "MIT"
+  }
 }

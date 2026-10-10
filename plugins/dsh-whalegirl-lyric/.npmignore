@@ -1,0 +1,8 @@
+# package.json 的 "files" 字段已用白名单限定发布内容（lib/ cordis.patch.yml README.md LICENSE）。
+# 本文件作为第二道保险：万一将来 files 被改动，这里仍会挡住开发相关文件。
+
+build/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
