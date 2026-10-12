@@ -23,13 +23,25 @@
 #   Hence step 0 below refuses to continue while DSH is running.
 #
 # USAGE (in a normal PowerShell window, with DeepSeek Harness fully closed):
-#   powershell -ExecutionPolicy Bypass -File "D:\MyProject\lyric_display\plugins\dsh-whalegirl-lyric\build\fix-profile-store.ps1"
+#   powershell -ExecutionPolicy Bypass -File "<repo>\plugins\dsh-whalegirl-lyric\build\fix-profile-store.ps1"
+#
+#   The path above is the only thing you supply -- it is where this file lives.
+#   Everything else (DSH home, profile, node, pnpm) is auto-detected, so this
+#   script is not tied to one machine or user name. Override only if detection
+#   picks the wrong thing:
+#     -DshHome <dir>   -Profile <name>   -ProfileDir <dir>
+#     -NodePath <exe>  -PnpmPath <cjs>
+
+param(
+  [string]$DshHome    = $env:DSH_HOME,
+  [string]$Profile    = $env:DSH_PROFILE,
+  [string]$ProfileDir = $env:DSH_PROFILE_DIR,
+  [string]$NodePath   = "",
+  [string]$PnpmPath   = ""
+)
 
 $ErrorActionPreference = 'Stop'
 
-$PROF       = "C:\Users\lys13\.dsh\profiles\desktop"
-$NODE       = "C:\Users\lys13\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-$PNPM       = "C:\Users\lys13\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs"
 $PLUGIN     = "dsh-whalegirl-lyric"
 $PLUGIN_VER = "1.0.0"
 
@@ -38,8 +50,75 @@ function Ok($m)   { Write-Host "  OK   $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "  !    $m" -ForegroundColor Yellow }
 function Die($m)  { Write-Host "  FAIL $m" -ForegroundColor Red; exit 1 }
 
-# ---------- 0. Precondition: DSH must be closed ----------
-Step 0 "Precondition: DeepSeek Harness must be fully closed"
+# ---------- 0a. Detect DSH home / profile / runtime paths ----------
+# Nothing below is hard-coded to a particular user name or install location.
+# Detection order: explicit parameter, then the env var DSH exports, then a
+# sensible default derived from $env:USERPROFILE.
+Step "0a" "Detect DSH home, profile, node and pnpm"
+
+if (-not $DshHome) { $DshHome = Join-Path $env:USERPROFILE ".dsh" }
+if (-not (Test-Path $DshHome)) { Die "DSH home not found: $DshHome (pass -DshHome <dir>)" }
+$DshHome = (Resolve-Path $DshHome).Path
+Ok "DSH home : $DshHome"
+
+# Prefer the profile DSH itself reports; otherwise use the only/first profile.
+if (-not $Profile) {
+  $profRoot = Join-Path $DshHome "profiles"
+  if (Test-Path $profRoot) {
+    $all = @(Get-ChildItem $profRoot -Directory -ErrorAction SilentlyContinue)
+    if ($all.Count -eq 1) {
+      $Profile = $all[0].Name
+      Ok "profile  : $Profile (only one found)"
+    } elseif ($all.Count -gt 1) {
+      Die ("Several profiles exist (" + (($all | ForEach-Object { $_.Name }) -join ', ') +
+           "). Pass -Profile <name>.")
+    }
+  }
+}
+if (-not $Profile) { $Profile = "desktop" }
+
+if (-not $ProfileDir) { $ProfileDir = Join-Path $DshHome "profiles\$Profile" }
+if (-not (Test-Path $ProfileDir)) {
+  Die "Profile directory not found: $ProfileDir (pass -ProfileDir <dir>)"
+}
+$ProfileDir = (Resolve-Path $ProfileDir).Path
+Ok "profile  : $Profile"
+Ok "profile dir: $ProfileDir"
+
+# node / pnpm live under the bundled runtime. Search instead of assuming the
+# runtime folder name, so a renamed runtime still works.
+if (-not $NodePath -or -not $PnpmPath) {
+  $depsRoots = @(
+    (Join-Path $DshHome "dsh-runtimes\*\dependencies"),
+    (Join-Path $DshHome "dsh-runtimes\*\*\dependencies")
+  )
+}
+if (-not $NodePath) {
+  $hit = @(Get-ChildItem -Path $depsRoots -Recurse -Filter "node.exe" -ErrorAction SilentlyContinue |
+           Select-Object -First 1)
+  if ($hit.Count -eq 0) { Die "node.exe not found under $DshHome\dsh-runtimes (pass -NodePath <exe>)" }
+  $NodePath = $hit[0].FullName
+}
+Ok "node     : $NodePath"
+
+if (-not $PnpmPath) {
+  # prefer the .cjs entry (works with plain 'node <file>'); fall back to .mjs
+  $hit = @(Get-ChildItem -Path $depsRoots -Recurse -Filter "pnpm.cjs" -ErrorAction SilentlyContinue |
+           Select-Object -First 1)
+  if ($hit.Count -eq 0) {
+    $hit = @(Get-ChildItem -Path $depsRoots -Recurse -Filter "pnpm.mjs" -ErrorAction SilentlyContinue |
+             Select-Object -First 1)
+  }
+  if ($hit.Count -eq 0) { Die "pnpm entry not found under $DshHome\dsh-runtimes (pass -PnpmPath <cjs>)" }
+  $PnpmPath = $hit[0].FullName
+}
+Ok "pnpm     : $PnpmPath"
+
+# Backup goes next to the DSH home, not inside any specific user path
+$BAKROOT = Join-Path $DshHome "_storefix"
+
+# ---------- 0b. Precondition: DSH must be closed ----------
+Step "0b" "Precondition: DeepSeek Harness must be fully closed"
 $running = Get-Process -Name "DeepSeek Harness" -ErrorAction SilentlyContinue
 if ($running) {
   $pids = ($running | ForEach-Object { $_.Id }) -join ', '
@@ -47,19 +126,18 @@ if ($running) {
 }
 Ok "No running DeepSeek Harness process found"
 
-if (-not (Test-Path $PROF)) { Die "Profile directory not found: $PROF" }
-if (-not (Test-Path $NODE)) { Die "Runtime node not found: $NODE" }
-if (-not (Test-Path $PNPM)) { Die "Runtime pnpm not found: $PNPM" }
+if (-not (Test-Path $NodePath)) { Die "Runtime node not found: $NodePath" }
+if (-not (Test-Path $PnpmPath)) { Die "Runtime pnpm not found: $PnpmPath" }
 Ok "All paths verified"
 
 # ---------- 1. Backup ----------
 Step 1 "Back up the profile and node_modules"
-$BAK = "C:\Users\lys13\.dsh\_storefix_" + (Get-Date -Format "yyyyMMdd-HHmmss")
+$BAK = Join-Path $BAKROOT (Get-Date -Format "yyyyMMdd-HHmmss")
 New-Item -ItemType Directory -Path $BAK -Force | Out-Null
 foreach ($f in @("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "cordis.yml", "cordis.patch.yml")) {
-  if (Test-Path "$PROF\$f") { Copy-Item "$PROF\$f" "$BAK\$f" -Force }
+  if (Test-Path "$ProfileDir\$f") { Copy-Item "$ProfileDir\$f" "$BAK\$f" -Force }
 }
-$nm = "$PROF\node_modules"
+$nm = "$ProfileDir\node_modules"
 $baseEntries = (Get-ChildItem $nm -Force -ErrorAction SilentlyContinue | Measure-Object).Count
 $baseFiles   = (Get-ChildItem $nm -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object).Count
 @{ entries = $baseEntries; files = $baseFiles } | ConvertTo-Json | Set-Content "$BAK\baseline.json" -Encoding ASCII
@@ -71,12 +149,12 @@ Ok "Backed up to $BAK ($baseEntries entries / $baseFiles files, $zipMB MB)"
 
 # ---------- 2. Rebuild node_modules with pnpm 11 ----------
 Step 2 "Rebuild node_modules with pnpm 11 (this empties it first)"
-Push-Location $PROF
+Push-Location $ProfileDir
 $env:CI = "true"
 $env:npm_config_confirm_modules_purge = "false"
-Write-Host "  store: $(& $NODE $PNPM store path 2>&1)"
+Write-Host "  store: $(& $NodePath $PnpmPath store path 2>&1)"
 Write-Host "  This may take a few minutes (55 packages, some with native modules)."
-& $NODE $PNPM install --frozen-lockfile --ignore-scripts --reporter=append-only
+& $NodePath $PnpmPath install --frozen-lockfile --ignore-scripts --reporter=append-only
 $code = $LASTEXITCODE
 Remove-Item env:CI -ErrorAction SilentlyContinue
 Remove-Item env:npm_config_confirm_modules_purge -ErrorAction SilentlyContinue
@@ -87,7 +165,7 @@ if ($code -ne 0) {
   Remove-Item $nm -Recurse -Force -ErrorAction SilentlyContinue
   Expand-Archive -Path "$BAK\node_modules.zip" -DestinationPath $nm -Force
   foreach ($f in @("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "cordis.yml", "cordis.patch.yml")) {
-    if (Test-Path "$BAK\$f") { Copy-Item "$BAK\$f" "$PROF\$f" -Force }
+    if (Test-Path "$BAK\$f") { Copy-Item "$BAK\$f" "$ProfileDir\$f" -Force }
   }
   Die "Rolled back to the pre-run state. Please send me the output above."
 }
@@ -111,8 +189,8 @@ Ok "Core dependencies all present"
 
 # ---------- 4. Install the plugin by package name ----------
 Step 4 "Install $PLUGIN@$PLUGIN_VER by package name"
-Push-Location $PROF
-& $NODE $PNPM add "$PLUGIN@$PLUGIN_VER" --reporter=append-only
+Push-Location $ProfileDir
+& $NodePath $PnpmPath add "$PLUGIN@$PLUGIN_VER" --reporter=append-only
 $code2 = $LASTEXITCODE
 Pop-Location
 if ($code2 -ne 0) {
@@ -125,24 +203,24 @@ Ok "Plugin directory present: $nm\$PLUGIN"
 
 # ---------- 5. Register the bundle ----------
 Step 5 "Add $PLUGIN to dsh.profile.bundles"
-$pkg = Get-Content "$PROF\package.json" -Raw | ConvertFrom-Json
+$pkg = Get-Content "$ProfileDir\package.json" -Raw | ConvertFrom-Json
 $bundles = @($pkg.dsh.profile.bundles)
 if ($bundles -notcontains $PLUGIN) {
   $pkg.dsh.profile.bundles = @($bundles + $PLUGIN)
-  $pkg | ConvertTo-Json -Depth 10 | Set-Content "$PROF\package.json" -Encoding UTF8
+  $pkg | ConvertTo-Json -Depth 10 | Set-Content "$ProfileDir\package.json" -Encoding UTF8
   Ok "Added (without this entry the plugin loads no routes and shows nothing)"
 } else {
   Ok "Already listed"
 }
-Get-Content "$PROF\package.json" | ForEach-Object { Write-Host "    $_" }
+Get-Content "$ProfileDir\package.json" | ForEach-Object { Write-Host "    $_" }
 
 # ---------- 6. Every bundle must resolve ----------
 Step 6 "Verify every bundle resolves"
-Push-Location $PROF
+Push-Location $ProfileDir
 $bad = @()
 foreach ($b in $pkg.dsh.profile.bundles) {
   $js = "import('" + $b + "').then(function(){console.log('OK')}).catch(function(){console.log('FAIL')})"
-  $r = & $NODE -e $js 2>&1
+  $r = & $NodePath -e $js 2>&1
   if ($r -eq 'OK') { Ok $b } else { $bad += $b; Warn "$b does not resolve" }
 }
 Pop-Location

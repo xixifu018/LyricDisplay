@@ -324,8 +324,16 @@ DSH 的客户端 bundle 是 **CJS factory 模型**，由 `window.__ModuleLoader_
 
 ```powershell
 # 必须先完全退出 DeepSeek Harness，否则会 EPERM
+# 唯一的参数就是本脚本自己的路径（$PSScriptRoot 所在处）
 powershell -ExecutionPolicy Bypass -File "<仓库路径>\plugins\dsh-whalegirl-lyric\build\fix-profile-store.ps1"
 ```
+
+> **路径全部自动探测，不绑定某台机器或某个用户名。** 探测顺序：
+> `-DshHome/-Profile/-NodePath/-PnpmPath` 参数 → DSH 导出的环境变量
+> （`DSH_HOME` / `DSH_PROFILE` / `DSH_PROFILE_DIR`）→ 由 `$env:USERPROFILE` 推导默认值。
+> `node.exe` 与 `pnpm` 入口是在 `$DshHome\dsh-runtimes\*\dependencies` 下**搜出来**的，
+> 因此运行时目录改名也不会失效。备份落在 `$DshHome\_storefix_<时间戳>`。
+> 需要覆盖时：`-DshHome <dir>` / `-Profile <名>` / `-ProfileDir <dir>` / `-NodePath <exe>` / `-PnpmPath <cjs>`。
 
 > **为什么必须先关掉 DSH**：重建的第一步是删空 `node_modules`，而 `lightningcss` 的
 > Windows 原生模块（`.node` 即 DLL）在 DSH 运行时被进程加载并锁定。Windows 拒绝删除
@@ -345,7 +353,10 @@ powershell -ExecutionPolicy Bypass -File "<仓库路径>\plugins\dsh-whalegirl-l
 装完（无论走 GUI 还是命令行）应确认这四处**同时**成立，缺一项就会出现「文件都在但插件没反应」或「Loader 报 cannot resolve profile bundle」：
 
 ```powershell
-$prof = "C:\Users\lys13\.dsh\profiles\desktop"
+# 不写死路径：DSH 自己会导出这几个变量
+# （DSH_HOME / DSH_PROFILE / DSH_PROFILE_DIR）；手工打开 PowerShell 时按需回退
+$prof = if ($env:DSH_PROFILE_DIR) { $env:DSH_PROFILE_DIR }
+        else { Join-Path $env:USERPROFILE ".dsh\profiles\desktop" }
 $p = Get-Content "$prof\package.json" -Raw | ConvertFrom-Json
 @{
   dependencies = @($p.dependencies.PSObject.Properties.Name) -contains 'dsh-whalegirl-lyric'

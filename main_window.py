@@ -1,20 +1,25 @@
 """主窗口 —— 紧凑浮窗、屏幕边缘吸附、单行歌词 + 封面"""
 
 import os
+import ctypes
 import subprocess
 import webbrowser
 
+from ctypes import wintypes
+
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl
 from PyQt5.QtWidgets import (
-    QMainWindow, QMenu, QWidget,
+    QMainWindow, QMenu, QWidget, QSystemTrayIcon,
     QGridLayout, QHBoxLayout, QGraphicsDropShadowEffect, QPushButton,
     QApplication, QSizePolicy,
 )
-from PyQt5.QtGui import QFont, QColor, QFontMetrics, QPixmap
+from PyQt5.QtGui import QFont, QColor, QFontMetrics, QPixmap, QIcon
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest
 
 import threading
 
+from hotkey import HotkeyManager
+import hotkey
 from lyrics_parser import parse_lrc, get_line_at, get_current_and_next
 from spectrum_widget import SpectrumWidget
 from audio_capture import AudioCapture
@@ -24,6 +29,48 @@ from settings import save as save_settings
 from round_cover import RoundCover
 
 SNAP_THRESHOLD = 20
+
+# 光标轮询间隔（毫秒）：锁定后判断「鼠标是否停在窗口上」
+CURSOR_POLL_MS = 100
+
+_user32 = ctypes.windll.user32
+
+
+class _POINT(ctypes.Structure):
+    """Win32 POINT，用于 GetCursorPos"""
+
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def cursor_pos():
+    """取全局光标位置（屏幕像素）；失败返回 None
+
+    锁定后窗口收不到 enterEvent/leaveEvent，悬浮解锁只能靠主动轮询光标。
+    """
+    pt = _POINT()
+    if _user32.GetCursorPos(ctypes.byref(pt)):
+        return pt.x, pt.y
+    return None
+
+
+def hover_unlock_step(pos, rect, accum_ms, armed, threshold_ms, step_ms):
+    """悬浮解锁的单步判定（纯函数，便于测试）
+
+    返回 (是否解锁, 新的累计毫秒, 是否已武装)。
+
+    armed 的意义：加锁那一刻光标可能正停在窗口上（例如从右键菜单点"锁定"），
+    若立刻开始计时就会马上自动解锁。因此要求光标**先离开窗口一次**才开始累计。
+    """
+    inside = pos is not None and rect.contains(pos[0], pos[1])
+
+    if not inside:
+        return False, 0, True          # 离开窗口：清零并武装
+    if not armed:
+        return False, 0, False         # 还没离开过，不计时
+    accum_ms += step_ms
+    if accum_ms >= threshold_ms:
+        return True, 0, False          # 达标解锁
+    return False, accum_ms, True
 
 LXMUSIC_WEBSITE = "https://lxmusic.toside.cn/"
 LXMUSIC_PATHS = [
@@ -59,8 +106,19 @@ class LyricsWindow(QMainWindow):
         self._is_playing = False
         self._api_connected = False
 
+        # 锁定态（不持久化，每次启动都是未锁定）
+        self._locked = False
+        self._hover_accum_ms = 0
+        self._hover_armed = False
+        self._tray = None
+        self._tray_lock_action = None
+        self._hotkeys = HotkeyManager()
+        self._hotkey_fingerprint = None
+        self._own_hotkeys = []
+
         self._init_ui()
         self._apply_style()
+        self._init_tray()
         self._current_lyric_text = "启动中..."
         self._update_display()
 
@@ -147,6 +205,12 @@ class LyricsWindow(QMainWindow):
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
         self._hover_timer.timeout.connect(self._hide_buttons)
+
+        # 锁定态下的光标轮询：窗口输入穿透后收不到 enterEvent，
+        # 只能靠主动查询光标位置来判断「鼠标停在窗口上多久了」
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setInterval(CURSOR_POLL_MS)
+        self._cursor_timer.timeout.connect(self._poll_cursor)
 
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(200)
@@ -276,11 +340,14 @@ class LyricsWindow(QMainWindow):
         super().showEvent(event)
         self._center_horizontally()
         self._do_dock()
+        # winId 在窗口真正建立后才有效，热键必须等到这时才能注册
+        self._setup_hotkeys()
 
     def update_settings(self, settings: dict):
         self._settings = settings
         self._apply_style()
         self._update_display()
+        self._setup_hotkeys()
         if self._docked:
             self._clamp_x()
 
@@ -376,8 +443,14 @@ class LyricsWindow(QMainWindow):
 
     def _open_settings(self):
         """打开设置对话框"""
-        dlg = SettingsDialog(self._settings, self)
-        if dlg.exec_() == dlg.Accepted:
+        # 把"当前真正注册着的热键"传进去，否则面板里锁/解锁两个键
+        # 都会被 probe 误判成"被其他程序占用"（probe 换 id 也注册不上：
+        # RegisterHotKey 的限制是整个进程级的）
+        dlg = SettingsDialog(self._settings, self, own_hotkeys=self._own_hotkeys)
+        accepted = dlg.exec_() == dlg.Accepted
+        lock_request = getattr(dlg, "lock_request", False)
+
+        if accepted:
             self._settings.update(dlg.result())
             save_settings(self._settings)
             self._display_mode = self._settings.get("display_mode", "single")
@@ -394,6 +467,10 @@ class LyricsWindow(QMainWindow):
             elif self._is_playing:
                 self._spectrum.start()
                 self._audio.start()
+
+        # 放在最后：锁定后窗口立即点击穿透，不能再依赖对话框已关闭之外的状态
+        if lock_request:
+            self._set_locked(True)
 
     def _do_dock(self):
         if not self._docked:
@@ -522,16 +599,165 @@ class LyricsWindow(QMainWindow):
         self._lx_btn.move(self.width() - 44, (self.height() - 16) // 2)
 
     # ============================================================
+    #  锁定 / 解锁
+    # ============================================================
+
+    def _set_locked(self, locked: bool):
+        """切换锁定态
+
+        锁定时给窗口加 Qt.WindowTransparentForInput：鼠标消息不再投递给本窗口，
+        点击与拖动直接落到下面的程序（游戏）上，同时 drag/双击/右键/点封面全部失效。
+
+        副作用：加这个标志后窗口收不到 enterEvent/leaveEvent，所以悬浮解锁
+        改由 _cursor_timer 轮询光标位置实现；setWindowFlags 会隐藏窗口，
+        必须紧跟 show() 且不影响 WA_ShowWithoutActivating（否则会抢走游戏焦点）。
+        """
+        self._hover_accum_ms = 0
+        # 加锁瞬间光标可能正好停在窗口上（比如从右键菜单点"锁定"），
+        # 若立刻开始累计就会马上自动解锁。要求先离开窗口一次才进入计时。
+        self._hover_armed = False
+
+        if locked:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowTransparentForInput)
+        else:
+            self.setWindowFlags(
+                self.windowFlags() & ~Qt.WindowTransparentForInput
+            )
+        self.show()          # setWindowFlags 会隐藏窗口，必须重新显示
+        self._locked = locked
+
+        if locked:
+            self._hover_timer.stop()
+            self._hide_buttons()
+            self._cursor_timer.start()
+        else:
+            self._cursor_timer.stop()
+
+        if self._tray_lock_action is not None:
+            self._tray_lock_action.setText("解锁窗口" if locked else "锁定窗口")
+
+        if not locked and self._docked:
+            self._do_dock()  # 重新显示后校正吸附位置
+
+    def _toggle_lock(self):
+        self._set_locked(not self._locked)
+
+    def _poll_cursor(self):
+        """锁定态下轮询光标：停在窗口上累计够设定秒数就自动解锁"""
+        if not self._locked:
+            return
+
+        seconds = self._settings.get("unlock_hover_seconds", 2)
+        try:
+            seconds = max(1, min(10, int(seconds)))
+        except (TypeError, ValueError):
+            seconds = 2
+
+        unlock, self._hover_accum_ms, self._hover_armed = hover_unlock_step(
+            cursor_pos(),
+            self.frameGeometry(),
+            self._hover_accum_ms,
+            self._hover_armed,
+            seconds * 1000,
+            CURSOR_POLL_MS,
+        )
+        if unlock:
+            self._set_locked(False)
+
+    def _setup_hotkeys(self):
+        """注册全局热键（可重复调用：改配置后重新注册）
+
+        注册失败不阻断启动——托盘菜单就是兜底出口。
+        锁定/解锁会触发 showEvent，这里用指纹比对避免无谓的重注册。
+        """
+        fingerprint = (
+            self._settings.get("hotkey_lock", "Ctrl+Alt+L"),
+            self._settings.get("hotkey_unlock", "Ctrl+Alt+U"),
+        )
+        if fingerprint == self._hotkey_fingerprint:
+            return
+
+        self._hotkeys.unregister_all()
+        self._own_hotkeys = []
+        if not self.winId():
+            return
+        self._hotkeys.set_window(int(self.winId()))
+        # 记下"真正注册成功"的那些：设置面板要用它把"自己的热键"从
+        # "被别人占用"里区分出来（否则打开面板会看到两个键都报占用）
+        for text, callback in (
+            (fingerprint[0], self._lock_hotkey),
+            (fingerprint[1], self._unlock_hotkey),
+        ):
+            if self._hotkeys.register(text, callback):
+                self._own_hotkeys.append(hotkey.normalize(text))
+        # 全部注册流程走完才记账：否则 winId 尚未就绪时会误判"已注册"
+        self._hotkey_fingerprint = fingerprint
+
+    def _lock_hotkey(self):
+        if not self._locked:
+            self._set_locked(True)
+
+    def _unlock_hotkey(self):
+        if self._locked:
+            self._set_locked(False)
+
+    def nativeEvent(self, event_type, message):
+        """接收 WM_HOTKEY（无需窗口焦点，游戏全屏时也有效）"""
+        if self._hotkeys.handles(event_type, message):
+            return True, 0
+        return super().nativeEvent(event_type, message)
+
+    # ============================================================
+    #  托盘图标
+    # ============================================================
+
+    def _init_tray(self):
+        """托盘图标：窗口被锁定（点击穿透）时唯一的兜底出口"""
+        if not self._settings.get("show_tray", True):
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        icon_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "lyrics-display-logo.png"
+        )
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        if icon.isNull():
+            return
+
+        self._tray = QSystemTrayIcon(icon, self)
+        self._tray.setToolTip("LyricDisplay")
+
+        menu = QMenu(self)
+        self._tray_lock_action = menu.addAction("锁定窗口")
+        self._tray_lock_action.triggered.connect(self._toggle_lock)
+        menu.addSeparator()
+        tray_exit = menu.addAction("退出")
+        tray_exit.triggered.connect(self.close)
+        self._tray.setContextMenu(menu)
+
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._toggle_lock()
+
+    # ============================================================
     #  事件
     # ============================================================
 
     def enterEvent(self, event):
+        if self._locked:
+            return
         self._close_btn.show()
         self._lx_btn.show()
         self._hover_timer.stop()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        if self._locked:
+            return
         self._hover_timer.start(1000)
         super().leaveEvent(event)
 
@@ -540,12 +766,16 @@ class LyricsWindow(QMainWindow):
         self._lx_btn.hide()
 
     def mousePressEvent(self, event):
+        if self._locked:
+            return  # 双保险：输入穿透失效时也不响应
         if event.button() == Qt.LeftButton:
             self._dragging = True
             self._drag_pos = event.globalPos()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._locked:
+            return
         if self._dragging and self._drag_pos:
             delta = event.globalPos() - self._drag_pos
             new_pos = self.pos() + delta
@@ -563,6 +793,8 @@ class LyricsWindow(QMainWindow):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._locked:
+            return
         if event.button() == Qt.LeftButton:
             self._dragging = False
             self._drag_pos = None
@@ -590,11 +822,15 @@ class LyricsWindow(QMainWindow):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        if self._locked:
+            return
         if event.button() == Qt.LeftButton:
             self._toggle_dock_edge()
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
+        if self._locked:
+            return
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -624,6 +860,8 @@ class LyricsWindow(QMainWindow):
         font_bigger = menu.addAction("字号 +")
         font_smaller = menu.addAction("字号 −")
         menu.addSeparator()
+        lock_hk = self._settings.get("hotkey_lock", "Ctrl+Alt+L")
+        lock_action = menu.addAction(f"锁定窗口（{lock_hk}）")
         lx_action = menu.addAction("打开洛雪音乐")
         settings_action = menu.addAction("设置...")
         menu.addSeparator()
@@ -647,6 +885,8 @@ class LyricsWindow(QMainWindow):
             self._settings["font_size"] = max(6, self._settings.get("font_size", 12) - 1)
             self._update_display()
             save_settings(self._settings)
+        elif action == lock_action:
+            self._set_locked(True)
         elif action == lx_action:
             self._launch_lxmusic()
         elif action == settings_action:
@@ -661,9 +901,14 @@ class LyricsWindow(QMainWindow):
     def closeEvent(self, event):
         self._progress_timer.stop()
         self._hover_timer.stop()
+        self._cursor_timer.stop()
         self._startup_timer.stop()
         self._audio.stop()
         self._spectrum.stop()
+        # 必须先注销全局热键，否则 id 会被系统占着（本次进程内无法再注册）
+        self._hotkeys.unregister_all()
+        if self._tray is not None:
+            self._tray.hide()
         self.closed.emit()
         # 强制退出，避免子线程阻塞关闭流程
         import os as _os

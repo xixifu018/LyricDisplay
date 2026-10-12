@@ -17,6 +17,13 @@ DEFAULT_SETTINGS = {
     "show_spectrum": True,
     "show_cover": True,
     "lxmusic_path": "",        # 洛雪音乐安装目录（留空=自动检测）
+    # ---- 窗口锁定（防误触）----
+    # 注意：锁定状态本身**不持久化**（每次启动都是未锁定），
+    # 避免锁定后重启、用户不知道如何解锁。这里只存配置。
+    "unlock_hover_seconds": 2,              # 鼠标悬浮几秒解锁（1~10）
+    "hotkey_lock": "Ctrl+Alt+L",            # 锁定
+    "hotkey_unlock": "Ctrl+Alt+U",          # 解锁
+    "show_tray": True,                      # 显示托盘图标（锁定时的兜底出口）
 }
 
 
