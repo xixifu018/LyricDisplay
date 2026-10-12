@@ -33,3 +33,10 @@ desktop.ini
 #   lyrics-display-logo.png  — 应用图标
 #   lyrics-display-logo.ico  — exe 图标（.spec 引用）
 #   test_cover.jpg           — 封面加载测试图
+
+# ---- 图标修复脚本产生的原始备份 ----
+# 原图在 git 历史里（提交 679eda1），不必重复入库，避免仓库翻倍。
+*.orig.png
+*.orig.ico
+_icon_preview.png
+_icon_sizes.png
