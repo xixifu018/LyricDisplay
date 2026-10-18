@@ -7,7 +7,7 @@ import webbrowser
 
 from ctypes import wintypes
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QUrl, QEvent
 from PyQt5.QtWidgets import (
     QMainWindow, QMenu, QWidget, QSystemTrayIcon,
     QGridLayout, QHBoxLayout, QGraphicsDropShadowEffect, QPushButton,
@@ -20,13 +20,16 @@ import threading
 
 from hotkey import HotkeyManager
 import hotkey
-from lyrics_parser import parse_lrc, get_line_at, get_current_and_next
+from lyrics_parser import (
+    parse_lyrics, get_line_at, get_current_and_next, find_line_index,
+)
 from spectrum_widget import SpectrumWidget
 from audio_capture import AudioCapture
 from flip_label import FlipLabel
 from settings_dialog import SettingsDialog
 from settings import save as save_settings
 from round_cover import RoundCover
+import zorder
 
 SNAP_THRESHOLD = 20
 
@@ -95,6 +98,7 @@ class LyricsWindow(QMainWindow):
         self._next_lyric_text = ""
         self._display_mode = settings.get("display_mode", "single")
         self._last_raw_lyric = ""
+        self._is_word_by_word = False   # 当前歌词是否带逐字时间（lxlyric）
         self._last_song_name = ""
         self._last_pic_url = ""
         self._cover_pixmap = QPixmap()
@@ -112,6 +116,13 @@ class LyricsWindow(QMainWindow):
         self._hover_armed = False
         self._tray = None
         self._tray_lock_action = None
+        # 窗口层级（置顶 / 正常 / 置底，三档互斥）
+        # 这两个开关**持久化**（与 locked 相反）：有托盘 + 热键两个出口，
+        # 即使重启后仍是置顶/置底也不会把用户困住。
+        self._always_on_top = bool(settings.get("always_on_top", True))
+        self._bottom_mode = bool(settings.get("bottom_mode", False))
+        self._tray_top_action = None
+        self._tray_bottom_action = None
         self._hotkeys = HotkeyManager()
         self._hotkey_fingerprint = None
         self._own_hotkeys = []
@@ -213,8 +224,16 @@ class LyricsWindow(QMainWindow):
         self._cursor_timer.timeout.connect(self._poll_cursor)
 
         self._progress_timer = QTimer(self)
-        self._progress_timer.setInterval(200)
+        # 逐字扫过需要 ~30fps 的推进，200ms 会明显一顿一顿
+        self._progress_timer.setInterval(33)
         self._progress_timer.timeout.connect(self._tick_progress)
+
+        # z 序保险丝：Windows 没有"常驻最底"样式，激活/显示桌面等操作
+        # 可能把窗口顶上来；置顶也可能被别的置顶窗口挤下去。
+        # 只在需要"保持层级"的模式下运行，一次 SetWindowPos，开销极小。
+        self._zorder_timer = QTimer(self)
+        self._zorder_timer.setInterval(1000)
+        self._zorder_timer.timeout.connect(self._apply_zorder)
 
         # 音频捕获
         self._audio = AudioCapture(self)
@@ -251,7 +270,15 @@ class LyricsWindow(QMainWindow):
             self._last_raw_lyric = ""
 
         if lyric_text and lyric_text != self._last_raw_lyric:
-            self._lyric_lines = parse_lrc(lyric_text)
+            # 优先用 ApiClient 解析好的行：那里会优先选逐字轨（lxlyric），
+            # 并已带上 syllables；这里再 parse_lrc 一次会把逐字信息丢掉。
+            lines = data.get("lyric_lines")
+            if lines is not None:
+                self._lyric_lines = lines
+                self._is_word_by_word = bool(data.get("is_word_by_word"))
+            else:
+                self._lyric_lines = parse_lyrics(lyric_text)[0]
+                self._is_word_by_word = False
             self._last_raw_lyric = lyric_text
 
         if self._lyric_lines:
@@ -294,6 +321,7 @@ class LyricsWindow(QMainWindow):
             self._spectrum.stop()
             self._audio.stop()
 
+        # 进度心跳：播放中才需要
         if self._is_playing and self._lyric_lines:
             self._progress_timer.start()
         else:
@@ -342,6 +370,22 @@ class LyricsWindow(QMainWindow):
         self._do_dock()
         # winId 在窗口真正建立后才有效，热键必须等到这时才能注册
         self._setup_hotkeys()
+        # 窗口层级是持久化的：启动时按配置恢复（此时 winId 才可用）
+        if self._bottom_mode:
+            QTimer.singleShot(0, lambda: self._set_bottom_mode(True))
+        else:
+            QTimer.singleShot(0, self._apply_zorder)
+
+    def changeEvent(self, event):
+        """窗口被激活/状态变化时重新应用层级
+
+        Windows 没有"常驻最底"样式：一旦窗口被激活（点一下、或从任务栏切回），
+        它就会被提到最上层。置顶也可能被别的置顶窗口挤下去。
+        这里在激活后补一次，配合 _zorder_timer 兜底。
+        """
+        super().changeEvent(event)
+        if event.type() in (QEvent.WindowStateChange, QEvent.ActivationChange):
+            self._apply_zorder()
 
     def update_settings(self, settings: dict):
         self._settings = settings
@@ -356,9 +400,12 @@ class LyricsWindow(QMainWindow):
     # ============================================================
 
     def _tick_progress(self):
+        # 播放中推进本地进度（33ms 心跳）
+        if self._is_playing and self._lyric_lines:
+            self._local_progress += self._progress_timer.interval() / 1000.0
+
         if not self._is_playing or not self._lyric_lines:
             return
-        self._local_progress += 0.2
         current_text, next_text = get_current_and_next(self._lyric_lines, self._local_progress)
         if current_text != self._current_lyric_text:
             self._current_lyric_text = current_text
@@ -367,6 +414,34 @@ class LyricsWindow(QMainWindow):
         elif next_text != self._next_lyric_text:
             self._next_lyric_text = next_text
             self._update_display()
+        else:
+            # 行没变，但逐字进度要往前走（只重绘标签，不重排布局）
+            self._push_word_progress()
+
+    def _push_word_progress(self):
+        """把"当前行 + 播放位置"推给标签，用于逐字扫过
+
+        每帧都调（33ms），所以这里面不能做重活：行下标用二分，音节几何在标签内
+        按需计算并依赖 Qt 的重绘合并。
+        """
+        if (not self._is_word_by_word or not self._lyric_lines
+                or not self._settings.get("show_word_by_word", True)):
+            return
+        text = self._current_lyric_text
+        # 只有当前显示的确实是歌词行时才有逐字数据；
+        # 显示"等待播放…"这类占位文本时下标为 -1。
+        idx = find_line_index(self._lyric_lines, self._local_progress)
+        if idx < 0:
+            self._lyric_label.set_lyric_data((), self._local_progress, False)
+            return
+        line = self._lyric_lines[idx]
+        if not line.has_syllables or line.text != text:
+            self._lyric_label.set_lyric_data((), self._local_progress, False)
+            return
+        active = line.time <= self._local_progress <= line.end
+        self._lyric_label.set_lyric_data(
+            line.syllables, self._local_progress, active
+        )
 
     def _update_display(self):
         """刷新标签文字 + 封面尺寸"""
@@ -377,8 +452,7 @@ class LyricsWindow(QMainWindow):
         font = QFont("Microsoft YaHei", font_size)
         font.setWeight(QFont.DemiBold)
         font.setStyleStrategy(QFont.PreferAntialias)
-        self._lyric_label.setFont(font)
-        self._lyric_label.setColor(text_color)
+        self._lyric_label.set_font_and_color(font, text_color)
 
         fm = QFontMetrics(font)
 
@@ -400,9 +474,15 @@ class LyricsWindow(QMainWindow):
 
         # 歌词可用宽度
         label_width = win_width - 24 - cover_size - 8 if has_cover else win_width - 24
-        elided_current = fm.elidedText(self._current_lyric_text, Qt.ElideRight, max(10, label_width))
-        elided_next = fm.elidedText(self._next_lyric_text, Qt.ElideRight, max(10, label_width))
+        safe_width = max(10, label_width)
+        # 标签要用同一个宽度自己做一次 elide：逐字扫过的像素几何必须建立在
+        # **实际绘制的那串文字**上，否则字素位置与 drawText 的结果会错位。
+        self._lyric_label.set_label_width(safe_width)
+        elided_current = fm.elidedText(self._current_lyric_text, Qt.ElideRight, safe_width)
+        elided_next = fm.elidedText(self._next_lyric_text, Qt.ElideRight, safe_width)
         self._lyric_label.setTexts(elided_current, elided_next)
+        # 布局变化后立刻把逐字进度补上，避免首帧不亮
+        self._push_word_progress()
 
         total_h = max(text_h, cover_size + 2)
         self.resize(win_width, total_h)
@@ -431,6 +511,13 @@ class LyricsWindow(QMainWindow):
             }}
         """)
 
+        # 告知歌词标签"合成后的实际背景色"，用于决定未唱的字往哪个方向弱化。
+        # 窗口是半透明的，底色会与桌面混合：按桌面中性灰 (127) 估算合成结果。
+        # 这里只需要"亮背景还是暗背景"这个量级，不需要精确值。
+        alpha = self._settings.get("bg_opacity", 0.45)
+        eff = tuple(int(round(c * alpha + 127 * (1 - alpha))) for c in (r, g, b))
+        self._lyric_label.set_bg_color("#%02X%02X%02X" % eff)
+
     # ============================================================
     #  吸附
     # ============================================================
@@ -456,6 +543,13 @@ class LyricsWindow(QMainWindow):
             self._display_mode = self._settings.get("display_mode", "single")
             self._lyric_label.setMode(self._display_mode)
             self.update_settings(self._settings)
+            # 窗口层级立即生效（面板里勾选/取消后不必重启）
+            want_bottom = bool(self._settings.get("bottom_mode", False))
+            if want_bottom != self._bottom_mode:
+                self._set_bottom_mode(want_bottom)
+            want_top = bool(self._settings.get("always_on_top", True))
+            if want_top != self._always_on_top:
+                self._set_always_on_top(want_top)
             # 封面/频谱开关立即生效
             if not self._settings.get("show_cover", True):
                 self._cover.setPixmap(QPixmap())
@@ -639,8 +733,112 @@ class LyricsWindow(QMainWindow):
         if not locked and self._docked:
             self._do_dock()  # 重新显示后校正吸附位置
 
+        # ⚠️ setWindowFlags 会**重建窗口**，Win32 扩展样式（WS_EX_NOACTIVATE）
+        # 连同 z 序一起被重置。所以锁定状态变化后必须重新应用层级，
+        # 否则"持久化置底 + 按一下锁定"就会把它顶回最上层。
+        self._apply_zorder()
+
     def _toggle_lock(self):
         self._set_locked(not self._locked)
+
+    # ============================================================
+    #  窗口层级（置顶 / 正常 / 置底，三档互斥）
+    # ============================================================
+
+    def _apply_zorder(self):
+        """按当前开关应用 z 序（唯一的落地点）
+
+        置底和置顶**都不加鼠标穿透**：用户要的是"被谁遮挡"，
+        点一下还能拖动更实用。"不可点击"是锁定态的职责。
+
+        这个函数必须**幂等**：它会被激活事件、1 秒保险丝、
+        setWindowFlags 重建窗口之后反复调用。
+        """
+        hwnd = int(self.winId()) if self.winId() else 0
+        if not hwnd or not zorder.available():
+            return
+
+        if self._bottom_mode:
+            # 桌面层窗口不该抢焦点：点它一下却让刚才的窗口失去焦点很突兀
+            zorder.set_no_activate(hwnd, True)
+            zorder.send_to_bottom(hwnd)
+        elif self._always_on_top:
+            zorder.set_no_activate(hwnd, False)
+            zorder.bring_to_front(hwnd)
+        else:
+            # 正常层级：能盖住置底窗口，也会被别人的窗口盖住
+            zorder.set_no_activate(hwnd, False)
+            zorder.send_to_normal(hwnd)
+
+    def _set_bottom_mode(self, enabled: bool):
+        """切换「窗口置底」
+
+        与 `_set_locked` 的区别（这两个很容易混）：
+          - 锁定：**不可点击**（WindowTransparentForInput），层级由置顶决定
+          - 置底：仍可点击/拖动，只是排到所有普通窗口之后
+
+        所以这里**不碰 windowFlags**，只改 Win32 扩展样式 + z 序：
+        `setWindowFlags` 会隐藏并重建窗口，位置、动画、WA_ShowWithoutActivating
+        都要重新料理，而"只是想置底"不需要付这个代价。
+        """
+        if enabled and not zorder.available():
+            return  # 非 Windows 静默忽略
+
+        if enabled:
+            # 三档互斥：开置底就关置顶（不调用 _set_always_on_top，
+            # 避免它反过来再调 _apply_zorder 造成一次多余的往返）
+            if self._always_on_top:
+                self._always_on_top = False
+                self._settings["always_on_top"] = False
+                if self._tray_top_action is not None:
+                    self._tray_top_action.setChecked(False)
+
+        self._bottom_mode = enabled
+        self._apply_zorder()
+
+        if enabled:
+            self._zorder_timer.start(1000)
+        else:
+            self._zorder_timer.stop()
+
+        if self._tray_bottom_action is not None:
+            self._tray_bottom_action.setChecked(enabled)
+
+        self._settings["bottom_mode"] = enabled
+        save_settings(self._settings)
+
+    def _toggle_bottom_mode(self):
+        self._set_bottom_mode(not self._bottom_mode)
+
+    def _set_always_on_top(self, enabled: bool):
+        """切换「窗口置顶」
+
+        默认开启，与窗口创建时的 `Qt.WindowStaysOnTopHint` 一致。
+        关掉它 = 回到正常层级（会被别的普通窗口盖住）。
+        """
+        if enabled and not zorder.available():
+            return
+
+        if enabled:
+            # 三档互斥：开置顶就关置底
+            if self._bottom_mode:
+                self._bottom_mode = False
+                self._settings["bottom_mode"] = False
+                self._zorder_timer.stop()
+                if self._tray_bottom_action is not None:
+                    self._tray_bottom_action.setChecked(False)
+
+        self._always_on_top = enabled
+        self._apply_zorder()
+
+        if self._tray_top_action is not None:
+            self._tray_top_action.setChecked(enabled)
+
+        self._settings["always_on_top"] = enabled
+        save_settings(self._settings)
+
+    def _toggle_always_on_top(self):
+        self._set_always_on_top(not self._always_on_top)
 
     def _poll_cursor(self):
         """锁定态下轮询光标：停在窗口上累计够设定秒数就自动解锁"""
@@ -673,6 +871,8 @@ class LyricsWindow(QMainWindow):
         fingerprint = (
             self._settings.get("hotkey_lock", "Ctrl+Alt+L"),
             self._settings.get("hotkey_unlock", "Ctrl+Alt+U"),
+            self._settings.get("hotkey_top", "Ctrl+Alt+T"),
+            self._settings.get("hotkey_bottom", "Ctrl+Alt+B"),
         )
         if fingerprint == self._hotkey_fingerprint:
             return
@@ -687,8 +887,10 @@ class LyricsWindow(QMainWindow):
         for text, callback in (
             (fingerprint[0], self._lock_hotkey),
             (fingerprint[1], self._unlock_hotkey),
+            (fingerprint[2], self._toggle_always_on_top),
+            (fingerprint[3], self._toggle_bottom_mode),
         ):
-            if self._hotkeys.register(text, callback):
+            if text and self._hotkeys.register(text, callback):
                 self._own_hotkeys.append(hotkey.normalize(text))
         # 全部注册流程走完才记账：否则 winId 尚未就绪时会误判"已注册"
         self._hotkey_fingerprint = fingerprint
@@ -731,6 +933,21 @@ class LyricsWindow(QMainWindow):
         menu = QMenu(self)
         self._tray_lock_action = menu.addAction("锁定窗口")
         self._tray_lock_action.triggered.connect(self._toggle_lock)
+        self._tray_top_action = menu.addAction("窗口置顶（盖住其它窗口）")
+        self._tray_top_action.setCheckable(True)
+        self._tray_top_action.setChecked(self._always_on_top)
+        self._tray_bottom_action = menu.addAction("窗口置底（让其它窗口盖住）")
+        self._tray_bottom_action.setCheckable(True)
+        self._tray_bottom_action.setChecked(self._bottom_mode)
+        # 用 lambda 吞掉 triggered 带的 checked 参数：只做"翻转"，
+        # 勾选状态一律由 _set_* 统一同步，避免两处各改一次而不一致。
+        # 两个开关互斥，所以点其中一个必然取消另一个。
+        self._tray_top_action.triggered.connect(
+            lambda *_: self._toggle_always_on_top()
+        )
+        self._tray_bottom_action.triggered.connect(
+            lambda *_: self._toggle_bottom_mode()
+        )
         menu.addSeparator()
         tray_exit = menu.addAction("退出")
         tray_exit.triggered.connect(self.close)

@@ -24,6 +24,7 @@ LXMUSIC_WEBSITE = "https://lxmusic.toside.cn/"
 # 这里优先用系统 UI 字体，逐个回退。
 UI_FONT_FAMILIES = ["Microsoft YaHei UI", "Microsoft YaHei", "微软雅黑", "SimHei", "SimSun"]
 UI_FONT_SIZE_PT = 10          # 10pt ≈ 13px，比原来的 7pt 大一圈
+HINT_FONT_PX = 11             # 说明小字（比正文小一号；用 px 不用 pt，便于精确控制）
 
 LABEL_FG = "#dddddd"          # 标签正文
 LABEL_FG_DIM = "#999999"      # 说明性小字
@@ -177,6 +178,29 @@ class SettingsDialog(QDialog):
             self.setFixedSize(340, min(self.height() + shortfall + 4, limit))
             self.layout().activate()
 
+        # ⚠️ 再兜一层：wordWrap 标签在**实际宽度**下可能比 sizeHint 更高。
+        # sizeHint 按它自己认为的宽度算，而对话框宽度固定为 340 → 实际更窄、
+        # 折行更多，于是 sizeHint 低估高度，上面的 shortfall 判不出来，
+        # 最后一行被裁（用户实际遇到："置顶与置底说明显示不全"）。
+        # 这里直接问每个标签"在它当前的宽度下需要多高"，按真实缺口补。
+        for _ in range(3):
+            deficit = 0
+            for i in range(self._tabs.count()):
+                self._tabs.setCurrentIndex(i)
+                self.layout().activate()
+                page = self._tabs.widget(i)
+                for lbl in page.findChildren(QLabel):
+                    if not lbl.wordWrap():
+                        continue
+                    need = (lbl.heightForWidth(lbl.width())
+                            if lbl.hasHeightForWidth() else lbl.sizeHint().height())
+                    deficit = max(deficit, need - lbl.height())
+            self._tabs.setCurrentIndex(current)
+            if deficit <= 0:
+                break
+            self.setFixedSize(340, min(self.height() + deficit + 4, limit))
+            self.layout().activate()
+
     # ============================================================
     #  字体与调色板
     # ============================================================
@@ -201,12 +225,26 @@ class SettingsDialog(QDialog):
         lbl.setStyleSheet(f"color: {LABEL_FG}; background: transparent;")
         return lbl
 
-    def _dim_label(self, text: str) -> QLabel:
-        """说明性小字（比正文暗一档）"""
+    def _hint_label(self, text: str) -> QLabel:
+        """说明性小字：换行 + 比正文小一号 + 暗一档
+
+        ⚠️ `keepHintStyle` 属性是给 `_apply_widget_styles()` 看的：
+        那里会给所有 QLabel 统一挂 `color` 样式，**会把这里的 font-size 抹掉**，
+        于是说明文字被放大到正文大小，在固定 340px 宽的对话框里撑高后被裁掉
+        （用户实际遇到："说明文字显示不全"）。
+        """
         lbl = QLabel(text)
         lbl.setWordWrap(True)
-        lbl.setStyleSheet(f"color: {LABEL_FG_DIM}; background: transparent;")
+        lbl.setProperty("keepHintStyle", True)
+        lbl.setStyleSheet(
+            f"color: {LABEL_FG_DIM}; background: transparent;"
+            f" font-size: {HINT_FONT_PX}px;"
+        )
         return lbl
+
+    def _dim_label(self, text: str) -> QLabel:
+        """说明性小字（比正文暗一档）—— 与 `_hint_label` 同一套样式"""
+        return self._hint_label(text)
 
     def _apply_widget_styles(self):
         """逐控件显式挂样式（字体、字色、底色都不再依赖层叠）
@@ -215,6 +253,10 @@ class SettingsDialog(QDialog):
         这些字符串曾经被误留在 _size_spinbox 里，引用了不存在的局部名而报错。
         """
         for lbl in self.findChildren(QLabel):
+            # 说明小字（`_hint_label`）自己带 font-size，这里不能覆盖：
+            # 一覆盖就回到正文大小，窄对话框里会撑高并被裁。
+            if lbl.property("keepHintStyle"):
+                continue
             lbl.setStyleSheet(f"color: {LABEL_FG}; background: transparent;")
 
         for box in self.findChildren(QCheckBox):
@@ -293,9 +335,9 @@ class SettingsDialog(QDialog):
                 f" font-weight: bold; }}"
             )
 
-        # 热键状态标签的字色是动态的，交给 _refresh_hotkey_status 处理
-        for lbl in (self._lock_hk_status, self._unlock_hk_status):
-            lbl.setStyleSheet(f"color: {LABEL_FG_DIM}; font-size: {UI_FONT_SIZE_PT}pt;")
+        # 热键状态标签统一由 `_hint_label` / `_set_status` 管样式（11px 小字）。
+        # 这里**不要再单独给它们写死字号**：曾只对 lock/unlock 两个写死 10pt，
+        # 后加的 top/bottom 漏了，于是四个状态行字号不一致。
 
         # 标题：上面的统一循环会把它也盖成普通标签，这里补回来
         title = self.findChild(QLabel, "dlgTitle")
@@ -398,6 +440,12 @@ class SettingsDialog(QDialog):
         self._refresh_hotkey_status("hotkey_lock", self._lock_hk_edit, self._lock_hk_status)
         self._refresh_hotkey_status(
             "hotkey_unlock", self._unlock_hk_edit, self._unlock_hk_status
+        )
+        self._refresh_hotkey_status(
+            "hotkey_top", self._top_hk_edit, self._top_hk_status
+        )
+        self._refresh_hotkey_status(
+            "hotkey_bottom", self._bottom_hk_edit, self._bottom_hk_status
         )
 
         self.setStyleSheet(self._style_sheet())
@@ -514,6 +562,11 @@ class SettingsDialog(QDialog):
         self._spectrum_check.toggled.connect(lambda v: self._update("show_spectrum", v))
         lay.addWidget(self._spectrum_check)
 
+        self._word_check = QCheckBox("逐字歌词（有逐字轨时按字扫过上色）")
+        self._word_check.setChecked(self._result.get("show_word_by_word", True))
+        self._word_check.toggled.connect(lambda v: self._update("show_word_by_word", v))
+        lay.addWidget(self._word_check)
+
         lay.addWidget(self._label("洛雪音乐安装目录"))
         lx_row = QHBoxLayout()
         self._lx_path_edit = QLineEdit()
@@ -601,8 +654,7 @@ class SettingsDialog(QDialog):
         )
         lock_hk_row.addWidget(self._lock_hk_edit)
         lay.addLayout(lock_hk_row)
-        self._lock_hk_status = QLabel("")
-        self._lock_hk_status.setStyleSheet("color: #999; font-size: 12px;")
+        self._lock_hk_status = self._hint_label("")
         lay.addWidget(self._lock_hk_status)
 
         # 解锁热键
@@ -620,9 +672,82 @@ class SettingsDialog(QDialog):
         )
         unlock_hk_row.addWidget(self._unlock_hk_edit)
         lay.addLayout(unlock_hk_row)
-        self._unlock_hk_status = QLabel("")
-        self._unlock_hk_status.setStyleSheet("color: #999; font-size: 12px;")
+        self._unlock_hk_status = self._hint_label("")
         lay.addWidget(self._unlock_hk_status)
+
+        # 窗口置顶热键
+        top_hk_row = QHBoxLayout()
+        top_hk_row.addWidget(self._label("窗口置顶热键"))
+        top_hk_row.addStretch()
+        self._top_hk_edit = QKeySequenceEdit(
+            QKeySequence(self._result.get("hotkey_top", "Ctrl+Alt+T"))
+        )
+        self._top_hk_edit.setFixedWidth(150)
+        self._top_hk_edit.keySequenceChanged.connect(
+            lambda seq: self._on_hotkey_changed(
+                "hotkey_top", seq, self._top_hk_edit
+            )
+        )
+        top_hk_row.addWidget(self._top_hk_edit)
+        lay.addLayout(top_hk_row)
+        self._top_hk_status = self._hint_label("")
+        lay.addWidget(self._top_hk_status)
+
+        # 窗口置底热键
+        bottom_hk_row = QHBoxLayout()
+        bottom_hk_row.addWidget(self._label("窗口置底热键"))
+        bottom_hk_row.addStretch()
+        self._bottom_hk_edit = QKeySequenceEdit(
+            QKeySequence(self._result.get("hotkey_bottom", "Ctrl+Alt+B"))
+        )
+        self._bottom_hk_edit.setFixedWidth(150)
+        self._bottom_hk_edit.keySequenceChanged.connect(
+            lambda seq: self._on_hotkey_changed(
+                "hotkey_bottom", seq, self._bottom_hk_edit
+            )
+        )
+        bottom_hk_row.addWidget(self._bottom_hk_edit)
+        lay.addLayout(bottom_hk_row)
+        self._bottom_hk_status = self._hint_label("")
+        lay.addWidget(self._bottom_hk_status)
+
+        # ---- 窗口层级：置顶 / 置底，互斥 ----
+        # 与"锁定"是两件事：锁定管"能不能点"，层级管"被谁遮挡"。
+        # 标签刻意写短：QCheckBox 不会换行，长文本会把对话框撑宽或被截断，
+        # 细节放到下面会自动换行的提示里。
+        self._top_check = QCheckBox("窗口置顶（盖住其它窗口）")
+        self._top_check.setChecked(self._result.get("always_on_top", True))
+        lay.addWidget(self._top_check)
+
+        self._bottom_check = QCheckBox("窗口置底（让其它窗口盖住）")
+        self._bottom_check.setChecked(self._result.get("bottom_mode", False))
+        lay.addWidget(self._bottom_check)
+
+        # 互斥：勾一个就取消另一个。_update 两边都写，主窗口据此应用。
+        def _on_top_toggled(checked):
+            self._update("always_on_top", bool(checked))
+            if checked:
+                self._bottom_check.blockSignals(True)
+                self._bottom_check.setChecked(False)
+                self._bottom_check.blockSignals(False)
+                self._update("bottom_mode", False)
+
+        def _on_bottom_toggled(checked):
+            self._update("bottom_mode", bool(checked))
+            if checked:
+                self._top_check.blockSignals(True)
+                self._top_check.setChecked(False)
+                self._top_check.blockSignals(False)
+                self._update("always_on_top", False)
+
+        self._top_check.toggled.connect(_on_top_toggled)
+        self._bottom_check.toggled.connect(_on_bottom_toggled)
+
+        layer_hint = self._hint_label(
+            "置顶与置底互斥，两个都不勾 = 正常层级。\n"
+            "置底后窗口仍可拖动；想透出壁纸请调低背景不透明度（功能页）。"
+        )
+        lay.addWidget(layer_hint)
 
         # 托盘图标（锁定后的兜底出口）
         self._tray_check = QCheckBox("显示托盘图标（锁定后的兜底出口）")
@@ -788,6 +913,13 @@ class SettingsDialog(QDialog):
         self._result["bg_color"] = self._bg_picker.selected
         self.accept()
 
+    def _set_status(self, label, text: str, color: str):
+        """热键状态小字：统一字号（与说明小字一致）"""
+        label.setText(text)
+        label.setStyleSheet(
+            f"color: {color}; background: transparent; font-size: {HINT_FONT_PX}px;"
+        )
+
     def _refresh_hotkey_status(self, key, edit, label):
         """用 probe 试注册来检测冲突
 
@@ -799,12 +931,11 @@ class SettingsDialog(QDialog):
         """
         text = edit.keySequence().toString()
         if not text:
-            label.setText("按一下想用的组合键即可录入")
-            label.setStyleSheet(f"color: {LABEL_FG_DIM}; font-size: 12px;")
+            self._set_status(label, "按一下想用的组合键即可录入", LABEL_FG_DIM)
             return
         if not hotkey.is_valid(text):
-            label.setText("不支持该组合，至少需要一个主键（如 Ctrl+Alt+L）")
-            label.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self._set_status(label, "不支持该组合，至少需要一个主键（如 Ctrl+Alt+L）",
+                             "#e67e22")
             return
 
         norm = hotkey.normalize(text)
@@ -813,29 +944,32 @@ class SettingsDialog(QDialog):
             edit.setKeySequence(QKeySequence(norm))
             edit.blockSignals(False)
 
-        # 自己的另一个热键是否已占了这个组合。
+        # 自己的其它热键是否已占了这个组合。
         # probe() 排除不掉这种"两框互撞"：Windows 允许同一进程用不同 id
         # 注册同一个组合键，而 probe 用的是独立 id 去试注册。
-        # 若两个框填成一样，锁定键会永远失效（只会锁、不会解），必须挡住。
-        other_key = "hotkey_unlock" if key == "hotkey_lock" else "hotkey_lock"
-        other_norm = hotkey.normalize(str(self._result.get(other_key, "")))
-        if other_norm and other_norm == norm:
-            other_name = "解锁" if key == "hotkey_lock" else "锁定"
-            label.setText(f"与{other_name}热键重复，请换一个")
-            label.setStyleSheet("color: #e74c3c; font-size: 12px;")
-            return
-
+        # 若两个框填成一样，先注册的那个会把后来者挤掉（锁定键会永远失效），必须挡住。
+        others = [
+            ("hotkey_lock", "锁定"),
+            ("hotkey_unlock", "解锁"),
+            ("hotkey_top", "窗口置顶"),
+            ("hotkey_bottom", "窗口置底"),
+        ]
+        norm_own = hotkey.normalize(str(self._result.get(key, "")))
+        for other_key, other_name in others:
+            if other_key == key:
+                continue
+            other_norm = hotkey.normalize(str(self._result.get(other_key, "")))
+            if other_norm and other_norm == norm:
+                self._set_status(label, f"与{other_name}热键重复，请换一个", "#e74c3c")
+                return
         status, detail = hotkey.probe(norm, own_hotkeys=self._own_hotkeys)
         if status == hotkey.STATUS_FREE:
-            label.setText(f"{norm} 可用")
-            label.setStyleSheet("color: #4caf50; font-size: 12px;")
+            self._set_status(label, f"{norm} 可用", "#4caf50")
         elif status == hotkey.STATUS_OWN:
             # 不是错误：这正是当前生效的配置
-            label.setText(f"{norm}（当前已在用）")
-            label.setStyleSheet(f"color: {LABEL_FG_DIM}; font-size: 12px;")
+            self._set_status(label, f"{norm}（当前已在用）", LABEL_FG_DIM)
         else:
-            label.setText(f"{norm} {detail}")
-            label.setStyleSheet("color: #e74c3c; font-size: 12px;")
+            self._set_status(label, f"{norm} {detail}", "#e74c3c")
 
     def _on_hotkey_changed(self, key, seq, edit):
         text = seq.toString()
@@ -847,5 +981,9 @@ class SettingsDialog(QDialog):
 
         if key == "hotkey_lock":
             self._refresh_hotkey_status(key, edit, self._lock_hk_status)
-        else:
+        elif key == "hotkey_unlock":
             self._refresh_hotkey_status(key, edit, self._unlock_hk_status)
+        elif key == "hotkey_top":
+            self._refresh_hotkey_status(key, edit, self._top_hk_status)
+        else:
+            self._refresh_hotkey_status(key, edit, self._bottom_hk_status)
