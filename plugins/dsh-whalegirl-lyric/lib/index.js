@@ -13,6 +13,10 @@
  * 路由上提供静态素材，图片由构建脚本内嵌进客户端 bundle。
  */
 
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
 import Schema from 'schemastery'
 
 import { PlayerController } from './controller.js'
@@ -48,6 +52,14 @@ export const Config = Schema.object({
   useSse: Schema.boolean()
     .default(true)
     .description('用 SSE 推送即时响应切歌与播放/暂停（官方推荐）；进度仍靠轮询外推'),
+  band: Schema.boolean()
+    .default(true)
+    .description('在会话标题栏的背景里显示逐字歌词（糖果色、每个字不同颜色）'),
+  bandOpacity: Schema.number()
+    .default(0.8)
+    .min(0)
+    .max(1)
+    .description('背景歌词带的不透明度（0~1；觉得晃眼就调低）'),
 })
 
 /** 硬依赖：Web 路由宿主。 */
@@ -156,9 +168,9 @@ async function serveCover(res, target, coverCache) {
 /**
  * 注册路由。
  * @param {import('@deepseek-ai/cordis').Context} ctx - 已注入 webServer 的上下文。
- * @param {PlayerController} player - 播放状态控制器。
+ * @param {{ player: PlayerController }} holder - 持有当前控制器（配置变更时会被替换）。
  */
-function registerRoutes(ctx, player) {
+function registerRoutes(ctx, holder) {
   /** 封面字节缓存：同一首歌只回源一次。 */
   const coverCache = new Map()
 
@@ -175,7 +187,7 @@ function registerRoutes(ctx, player) {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
       const cover = url.searchParams.get('cover')
       if (cover !== null) {
-        if (!isCurrentCoverUrl(cover, player.raw.picUrl)) {
+        if (!isCurrentCoverUrl(cover, holder.player.raw.picUrl)) {
           res.writeHead(404).end()
           return
         }
@@ -183,7 +195,7 @@ function registerRoutes(ctx, player) {
         return
       }
 
-      sendJson(res, 200, player.snapshot())
+      sendJson(res, 200, holder.player.snapshot())
     },
   })
 
@@ -203,7 +215,7 @@ function registerRoutes(ctx, player) {
         sendJson(res, 400, { ok: false, error: String(error?.message ?? error) })
         return
       }
-      const result = await player.control(action)
+      const result = await holder.player.control(action)
       sendJson(res, result.ok ? 200 : 400, result)
     },
   })
@@ -217,30 +229,169 @@ function registerRoutes(ctx, player) {
   )
 }
 
+// ---------------------------------------------------------------- 配置读写
+
+/**
+ * 设置页可编辑的字段。
+ *
+ * `type` 决定客户端渲染成什么控件；`fallback` 与 `Config` 里的默认值保持一致。
+ * 这里的顺序就是设置页里的显示顺序。
+ */
+const CONFIG_FIELDS = [
+  { key: 'host', label: '洛雪 API 地址', type: 'text', fallback: '127.0.0.1',
+    hint: '一般留 127.0.0.1；填远程地址前请确认对方已开启开放 API' },
+  { key: 'port', label: '端口', type: 'number', min: 1, max: 65535, step: 1, fallback: 23330,
+    hint: '洛雪「设置 → 基本设置 → 开放 API」里的端口' },
+  { key: 'lyrics', label: '气泡里显示歌词', type: 'bool', fallback: true,
+    hint: '关闭后挂件整个隐藏，播放控制改到标题栏歌词带上悬浮显示' },
+  { key: 'translation', label: '同时显示翻译', type: 'bool', fallback: true },
+  { key: 'band', label: '标题栏背景歌词带', type: 'bool', fallback: true },
+  { key: 'bandOpacity', label: '歌词带不透明度', type: 'number', min: 0, max: 1, step: 0.05, fallback: 0.8,
+    hint: '0 = 完全看不见，1 = 最亮' },
+  { key: 'pollIntervalMs', label: '状态轮询间隔（毫秒）', type: 'number', min: 200, max: 5000, step: 100, fallback: 500,
+    hint: '越短歌词越跟手，请求也越频繁' },
+  { key: 'useSse', label: '用 SSE 即时推送切歌与播放状态', type: 'bool', fallback: true },
+]
+
+/** 配置持久化路径：放在 DSH home 的 storages 下，卸载插件不影响其它数据。 */
+function configPath() {
+  return path.join(os.homedir(), '.dsh', 'storages', NS, 'config.json')
+}
+
+/** 读取已保存的覆盖值；文件不存在或损坏时返回空对象。 */
+function readSaved() {
+  try {
+    const text = fs.readFileSync(configPath(), 'utf8')
+    const data = JSON.parse(text)
+    return data !== null && typeof data === 'object' ? data : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 写盘（先建目录）。 */
+function writeSaved(values) {
+  const file = configPath()
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(values, null, 2), 'utf8')
+}
+
+/** 把任意输入收敛成合法配置：数字夹到范围内、布尔强制转换、地址去空白。 */
+function normalize(input) {
+  const out = {}
+  for (const field of CONFIG_FIELDS) {
+    const raw = input !== null && typeof input === 'object' ? input[field.key] : undefined
+    if (field.type === 'bool') {
+      out[field.key] = raw === undefined ? field.fallback : raw === true || raw === 'true'
+    } else if (field.type === 'number') {
+      const num = Number(raw)
+      const value = Number.isFinite(num) ? num : field.fallback
+      out[field.key] = Math.min(field.max, Math.max(field.min, value))
+    } else {
+      const text = typeof raw === 'string' ? raw.trim() : ''
+      out[field.key] = text === '' ? field.fallback : text
+    }
+  }
+  return out
+}
+
 /**
  * 插件入口。
+ *
+ * 配置优先级：设置页保存的值 > Loader 传入的 config > 字段默认值。
+ * 这样用户在「设置 → 鲸鱼娘歌词」里改过之后，不必再动 `cordis.patch.yml`。
+ *
  * @param {import('@deepseek-ai/cordis').Context} ctx - 插件上下文。
  * @param {object} config - 已校验的插件配置。
  */
 export function apply(ctx, config) {
-  const player = new PlayerController({
-    host: config.host,
-    port: config.port,
-    lyrics: config.lyrics,
-    translation: config.translation,
-    pollIntervalMs: config.pollIntervalMs,
-    useSse: config.useSse,
-  })
+  const saved = readSaved()
+  let values = normalize({ ...config, ...saved })
+
+  /** 当前控制器（配置变更时整体替换）。 */
+  const holder = { player: null }
+
+  const startPlayer = () => {
+    const player = new PlayerController({
+      host: values.host,
+      port: values.port,
+      lyrics: values.lyrics,
+      translation: values.translation,
+      pollIntervalMs: values.pollIntervalMs,
+      useSse: values.useSse,
+      band: values.band,
+      bandOpacity: values.bandOpacity,
+    })
+    player.start()
+    holder.player = player
+    return player
+  }
+
+  const stopPlayer = () => {
+    if (holder.player !== null) {
+      holder.player.stop()
+      holder.player = null
+    }
+  }
 
   ctx.effect(
     () => {
-      player.start()
-      return () => player.stop()
+      holder.player = null
+      startPlayer()
+      return () => stopPlayer()
     },
     `${NS}: lx-music poller`,
   )
 
-  registerRoutes(ctx, player)
+  registerRoutes(ctx, holder)
 
-  ctx.logger?.debug?.(`${NS}: 轮询 ${player.baseUrl}（每 ${player.pollIntervalMs}ms）`)
+  // 设置页用的读/写接口
+  const offConfig = ctx.webServer.register({
+    kind: 'exact',
+    path: `${API_PREFIX}/config`,
+    handler: async (req, res) => {
+      if (req.method === 'GET' || req.method === 'HEAD') {
+        sendJson(res, 200, { ok: true, values, fields: CONFIG_FIELDS })
+        return
+      }
+      if (req.method !== 'POST') {
+        res.writeHead(405).end()
+        return
+      }
+      let body = {}
+      try {
+        body = await readJsonBody(req)
+      } catch (error) {
+        sendJson(res, 400, { ok: false, error: String(error?.message ?? error) })
+        return
+      }
+      const next = normalize(body.values ?? body)
+      // 先落盘再热重载：即使重启失败，下次启动也是新配置
+      try {
+        writeSaved(next)
+      } catch (error) {
+        sendJson(res, 500, { ok: false, error: String(error?.message ?? error) })
+        return
+      }
+      values = next
+      stopPlayer()
+      try {
+        startPlayer()
+      } catch (error) {
+        sendJson(res, 500, { ok: false, values, error: String(error?.message ?? error) })
+        return
+      }
+      sendJson(res, 200, { ok: true, values })
+    },
+  })
+
+  ctx.effect(
+    () => () => {
+      offConfig()
+      stopPlayer()
+    },
+    `${NS}: config route`,
+  )
+
+  ctx.logger?.debug?.(`${NS}: 轮询 http://${values.host}:${values.port}（每 ${values.pollIntervalMs}ms）`)
 }

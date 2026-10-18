@@ -17,6 +17,8 @@ window.__ModuleLoader__.load({
 		var STATE_API = "/api/" + NS + "/state";
 		/** 控制接口。 */
 		var CONTROL_API = "/api/" + NS + "/control";
+		/** 配置读写接口（设置页用）。 */
+		var CONFIG_API = "/api/" + NS + "/config";
 		/** 轮询间隔：略快于 Host 的 500ms，让进度条更顺。 */
 		var POLL_MS = 300;
 		/** 隐藏状态在 localStorage 中的键。 */
@@ -262,6 +264,64 @@ window.__ModuleLoader__.load({
 			".dshWg_dockText{font-size:10px;max-width:88px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
 			".dshWg_dockDot{width:5px;height:5px;border-radius:50%;flex:none;background:var(--dsw-alias-state-idle-primary)}",
 			".dshWg_dock[data-playing='true'] .dshWg_dockDot{background:var(--dsw-alias-state-success-primary)}",
+
+			// ---- 背景歌词带（会话标题栏）----
+			// 关键：root 加 isolation:isolate 建独立层叠上下文，
+			// 否则 z-index:-1 会跑到 root 的不透明背景后面，歌词整条看不见。
+			"[data-dsh-lyric-host]{isolation:isolate}",
+			// 只加定位：overflow 交给带子自己裁，免得把宿主标题栏里的弹层/焦点框剪掉
+			"[data-dsh-lyric-band]{position:relative !important}",
+			".dshLyricBand{position:absolute;inset:0;z-index:-1;pointer-events:none;display:flex;align-items:center;justify-content:center;padding:0 24px;overflow:hidden;"
+				+ "-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 5%,#000 95%,transparent 100%);"
+				+ "mask-image:linear-gradient(90deg,transparent 0,#000 5%,#000 95%,transparent 100%)}",
+			// 字号不宜过大：长句要能在"标题与按钮之间"放得下（23px 时 ~30 字仍可容纳）。
+			// ⚠️ 两个都不能少：
+			//   - line-height:1.5 —— 默认 1.2 时 g/y 这类下伸部会被裁掉（真实踩过）
+			//   - 不要 overflow:hidden —— 那会按行盒裁字，下伸部同样被切
+			// 长句由 `fitBandLine()` 自动缩字号，所以不靠裁切来兜底
+			".dshLyricBand__line{position:relative;max-width:64%;white-space:nowrap;"
+				+ "font-size:23px;font-weight:800;letter-spacing:.04em;line-height:1.5;padding-bottom:6px;"
+				+ "color:var(--dsw-alias-label-primary,#e8e8e8)}",
+			// 颜色由 JS 逐字写（每个字一种糖果色），这里只保留排版属性
+			".dshLyricBand__ch{display:inline-block;will-change:color}",
+			// 悬浮播放控制：挂在 shell.overlay 层（和挂件按钮同一层，可点击），
+			// 用 fixed 定位贴到歌词文字右侧。**不要放进标题栏** ——
+			// 那里是 Electron 的窗口拖拽区（-webkit-app-region: drag），
+			// 落在里面的按钮收不到点击（真实踩过两次）。
+			".dshWg_transport{position:fixed;z-index:41;display:flex;align-items:center;gap:4px;"
+				+ "padding:4px 6px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1);"
+				+ "background:var(--dsw-alias-bg-overlay);box-shadow:0 4px 14px rgba(0,0,0,.28);"
+				+ "backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);"
+				+ "-webkit-app-region:no-drag;user-select:none}",
+			".dshWg_transportBtn{width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;"
+				+ "border:none;border-radius:50%;padding:0;cursor:pointer;font-size:12px;line-height:1;"
+				+ "background:transparent;color:var(--dsw-alias-label-primary)}",
+			".dshWg_transportBtn:hover{background:var(--dsw-alias-bg-layer-2)}",
+			".dshWg_transportBtn:disabled{opacity:.5;cursor:default}",
+
+			// 光标横条：只在"当前正在唱的那个字"下方，像终端里的输入光标
+			".dshLyricBand__caret{position:absolute;bottom:2px;left:0;width:0;height:3px;border-radius:2px;"
+				+ "background:currentColor;opacity:.95;display:none;will-change:left,width,color;"
+				+ "animation:dshLyricCaret 1.1s ease-in-out infinite}",
+			"@keyframes dshLyricCaret{0%,100%{opacity:.95}50%{opacity:.55}}",
+
+			// ---- 设置页（设置 → 鲸鱼娘歌词）----
+			".dshWgSet{display:flex;flex-direction:column;gap:16px;max-width:560px;padding:4px 2px 24px;"
+				+ "color:var(--dsw-alias-label-primary);font-size:13px}",
+			".dshWgSet_row{display:flex;flex-direction:column;gap:6px}",
+			".dshWgSet_label{font-size:13px;font-weight:600}",
+			".dshWgSet_hint{font-size:11px;color:var(--dsw-alias-label-tertiary);line-height:1.5}",
+			".dshWgSet_input{width:100%;box-sizing:border-box;padding:6px 9px;border-radius:6px;"
+				+ "border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);"
+				+ "color:var(--dsw-alias-label-primary);font:inherit}",
+			".dshWgSet_input:focus{outline:none;border-color:var(--dsw-alias-brand-primary)}",
+			".dshWgSet_check{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}",
+			".dshWgSet_actions{display:flex;align-items:center;gap:12px;margin-top:4px}",
+			".dshWgSet_btn{border:none;border-radius:6px;padding:7px 16px;font:inherit;cursor:pointer;"
+				+ "background:var(--dsw-alias-brand-primary);color:#fff}",
+			".dshWgSet_btn:disabled{opacity:.55;cursor:default}",
+			".dshWgSet_note{font-size:12px;color:var(--dsw-alias-label-secondary)}",
+			".dshWgSet_note[data-error='true']{color:var(--dsw-alias-state-error-primary)}",
 		].join("");
 
 		//#region 图标
@@ -348,9 +408,11 @@ window.__ModuleLoader__.load({
 		 */
 		function LyricBubble(props) {
 			var data = props.data;
-			var lyric = typeof data?.lyric === "string" ? data.lyric : "";
-			var translation = typeof data?.translation === "string" ? data.translation : "";
-			var next = typeof data?.next === "string" ? data.next : "";
+			// 设置里关掉「气泡里显示歌词」时，气泡只显示歌名（背景歌词带仍然独立工作）
+			var showLyric = data?.lyricsEnabled !== false;
+			var lyric = showLyric && typeof data?.lyric === "string" ? data.lyric : "";
+			var translation = showLyric && typeof data?.translation === "string" ? data.translation : "";
+			var next = showLyric && typeof data?.next === "string" ? data.next : "";
 
 			var body;
 			if (lyric !== "") {
@@ -588,6 +650,472 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		//#region 背景歌词带
+		/**
+		 * 会话标题栏背景里的逐字歌词带。
+		 *
+		 * 为什么直接操作 DOM 而不是注册插槽：DSH 没有"会话内容下方"的插槽，
+		 * `conversation.session.header` 是 single（注册会顶掉真标题）。
+		 * 所以用锚点定位 + 注入节点：
+		 *   - 锚点用 `data-conversation-tabs` / `data-conversation-header-corner`
+		 *     （不是哈希类名，宿主升级也能命中）
+		 *   - 层叠靠 `[data-dsh-lyric-host]{isolation:isolate}` + 子节点 `z-index:-1`
+		 *
+		 * 渲染用 rAF + 直接写样式：宿主每 300ms 推一次快照，
+		 * 若用 React state 驱动动画，每次推送都会把动画打断。
+		 */
+		// 糖果色板：逐字循环取色（每个字一种颜色）
+		var BAND_PALETTE = [
+			[255, 92, 138],   // 草莓粉
+			[255, 176, 58],   // 芒果橙
+			[255, 225, 77],   // 柠檬黄
+			[107, 227, 140],  // 青苹果
+			[79, 216, 216],   // 薄荷
+			[91, 184, 255],   // 汽水蓝
+			[155, 140, 255],  // 葡萄紫
+			[255, 123, 213],  // 泡泡糖
+		];
+		/** 未唱的字保留的透明度（颜色不变，只压暗）。 */
+		var BAND_DIM_ALPHA = 0.33;
+
+		var bandState = { data: null };
+		var bandEls = null;
+		var bandRaf = 0;
+		var bandLastTry = 0;
+
+		/**
+		 * 找主面板里的会话标题栏（排除右侧会话副本）。
+		 *
+		 * ⚠️ 两条踩过的坑：
+		 *  1. **不能取 `tabs.parentElement`** —— `<header>` 与页签行之间隔着一层
+		 *     「插槽容器」，它可能是 `display:contents`（不生成盒子），
+		 *     对它设 `position:relative` 无效，`inset:0` 会按更外层的定位祖先生效，
+		 *     于是歌词带跑到**整块会话正文中间**（真实发生过）。
+		 *     → 用 `closest("header")` 直接拿语义标签，与插槽结构无关。
+		 *  2. `data-conversation-header-corner` 在 `titleRow` 里面，同理用 closest。
+		 */
+		function findBandHeader() {
+			var tabs = document.querySelectorAll("[data-conversation-tabs]");
+			for (var i = 0; i < tabs.length; i += 1) {
+				if (tabs[i].closest("[data-sidebar-right-session]") !== null) continue;
+				var owner = tabs[i].closest("header");
+				if (owner !== null) return owner;
+			}
+			var corner = document.querySelector("[data-conversation-header-corner]");
+			if (corner !== null) {
+				var owner2 = corner.closest("header");
+				if (owner2 !== null) return owner2;
+			}
+			// 回退：往上找最近的 grid 且高度合理（≤200px）的容器
+			var el = tabs.length > 0 ? tabs[0].parentElement : null;
+			while (el !== null && el !== document.body) {
+				var rect = el.getBoundingClientRect();
+				if (window.getComputedStyle(el).display === "grid" && rect.height > 0 && rect.height <= 200) return el;
+				el = el.parentElement;
+			}
+			return null;
+		}
+
+		/**
+		 * 找"带不透明背景的那一层"——必须把 isolation 加在它身上。
+		 *
+		 * ⚠️ 层叠顺序：同一 stacking context 内，负 z-index 子节点（第 2 步）**先**画，
+		 * 不带定位的块背景（第 3 步）、文本（第 5 步）**后**画。
+		 * 所以 isolation 若加在更外层的 wrapper 上，歌词会落在会话根的背景**下面** → 看不见。
+		 * 只有加在"背景就在它身上"的那个元素上，负 z-index 才叠在背景之上、内容之下。
+		 */
+		function findBandRoot(header) {
+			var el = header.parentElement;
+			while (el !== null && el !== document.body) {
+				var bg = window.getComputedStyle(el).backgroundColor;
+				if (bg && bg !== "transparent" && bg !== "rgba(0, 0, 0, 0)") return el;
+				el = el.parentElement;
+			}
+			return header.parentElement;
+		}
+
+		/** 确保节点已注入；标题栏被 React 重建时自动补回。 */
+		function ensureBand() {
+			var header = findBandHeader();
+			if (header === null) return null;
+			// 护栏：
+			//  - 高度必须在 ~20~220px 之间（真 header 约 76px）
+			//  - display 不能是 contents（那种元素不生成盒子，position:relative 无效，
+			//    带子会按更外层定位 → 跑到会话正文中间）
+			var hrect = header.getBoundingClientRect();
+			if (hrect.height < 20 || hrect.height > 220) return null;
+			if (window.getComputedStyle(header).display === "contents") return null;
+
+			var root = findBandRoot(header);
+			if (root === null) return null;
+
+			if (bandEls !== null && bandEls.header === header && header.isConnected) return bandEls;
+
+			root.setAttribute("data-dsh-lyric-host", "");
+			header.setAttribute("data-dsh-lyric-band", "");
+
+			// 清掉可能残留的旧节点，避免重复叠加
+			var stale = header.querySelectorAll(":scope > .dshLyricBand");
+			for (var s = 0; s < stale.length; s += 1) stale[s].remove();
+
+			var band = document.createElement("div");
+			band.className = "dshLyricBand";
+			var line = document.createElement("div");
+			line.className = "dshLyricBand__line";
+			band.appendChild(line);
+			// 光标横条：像终端输入光标一样，贴在"当前正在唱的那个字"下方
+			var caret = document.createElement("div");
+			caret.className = "dshLyricBand__caret";
+			band.appendChild(caret);
+			header.appendChild(band);
+
+			bandEls = {
+				root: root,
+				header: header,
+				band: band,
+				line: line,
+				caret: caret,
+				spans: [],
+				sig: "",
+				lastQ: [],
+				lastCaret: -1,
+			};
+			return bandEls;
+		}
+
+		/**
+		 * 把光标横条移到第 `index` 个字下方；`index < 0` 时隐藏。
+		 *
+		 * ⚠️ 只在"当前字变了"时才调用：这里要读 offsetLeft/offsetWidth，
+		 * 每帧调用会持续触发布局计算。
+		 */
+		function placeCaret(els, index) {
+			if (els.caret === null) return;
+			if (index < 0 || index >= els.spans.length) {
+				els.caret.style.display = "none";
+				return;
+			}
+			var span = els.spans[index];
+			var rgb = BAND_PALETTE[index % BAND_PALETTE.length];
+			// 注意：这里必须是 "block"。CSS 里默认 display:none，
+			// 写空字符串只是删掉内联样式，仍然会回落到 none（踩过）。
+			els.caret.style.display = "block";
+			// 偏移都相对于各自的 offsetParent：span 在 line 内，line 在 band 内
+			els.caret.style.left = (els.line.offsetLeft + span.offsetLeft) + "px";
+			els.caret.style.width = span.offsetWidth + "px";
+			els.caret.style.color = "rgba(" + rgb.join(",") + ",0.95)";
+		}
+
+		/** 换行时重建字符 span（只在文本变化时做）。 */
+		function rebuildBandLine(els, words) {
+			els.line.textContent = "";
+			els.spans = [];
+			els.lastQ = [];
+			els.lastCaret = -1;
+			for (var i = 0; i < words.length; i += 1) {
+				var span = document.createElement("span");
+				span.className = "dshLyricBand__ch";
+				// AWLRC 的拉丁文音节常带词尾空格（"There "），直接塞进 inline-block
+				// 会被当成行尾空白折叠掉 → 单词全连在一起（踩过）。用 NBSP 保留。
+				span.textContent = String(words[i].t).replace(/ /g, "\u00A0");
+				els.line.appendChild(span);
+				els.spans.push(span);
+				els.lastQ.push(-1);
+			}
+		}
+
+		/**
+		 * 长句自适应：内容超出可用宽度时按比例缩小字号，保证整句不裁字。
+		 *
+		 * 只在换行时执行一次（会触发一次布局），不进每帧循环。
+		 * 基准字号 23px 与 CSS 里 `.dshLyricBand__line` 保持一致。
+		 */
+		function fitBandLine(els) {
+			els.line.style.fontSize = "";
+			var max = els.line.clientWidth;
+			var need = els.line.scrollWidth;
+			if (max > 0 && need > max) {
+				var size = Math.max(13, 23 * (max / need));
+				els.line.style.fontSize = size.toFixed(2) + "px";
+			}
+			// 字号变了，光标位置要重算
+			placeCaret(els, els.lastCaret);
+		}
+
+		/**
+		 * 画一帧。`now` 是外推后的播放位置（秒）。
+		 *
+		 * 只在"进度跨过一个量化档"时才写颜色；当前字只把颜色走到不透明，
+		 * **不加任何背景/光晕**（大字号下会发虚），进度靠下方的光标横条表示。
+		 */
+		function paintBand(els, data, now) {
+			var words = data.words;
+			var active = -1;
+			var lastSung = -1;
+			for (var i = 0; i < words.length; i += 1) {
+				var word = words[i];
+				var span2 = word.e - word.s;
+				var p = span2 > 0 ? (now - word.s) / span2 : (now >= word.s ? 1 : 0);
+				p = Math.max(0, Math.min(1, p));
+				// 量化到 1/24，避免每帧都写样式（60fps × 30 字 = 不必要的重排）
+				var q = Math.round(p * 24) / 24;
+				if (q !== els.lastQ[i]) {
+					els.lastQ[i] = q;
+					var rgb = BAND_PALETTE[i % BAND_PALETTE.length];
+					// 未唱压到 33% 透明度、已唱全亮 —— 每个字保留自己的糖果色
+					els.spans[i].style.color =
+						"rgba(" + rgb.join(",") + "," + (BAND_DIM_ALPHA + (1 - BAND_DIM_ALPHA) * q).toFixed(3) + ")";
+				}
+				// 当前字 = 已经开始唱、且还没唱完的那一个；
+				// 整行都唱完时停在最后一个字上（别跳回句首）
+				if (p > 0 && p < 1) active = i;
+				if (p >= 1) lastSung = i;
+			}
+
+			if (active < 0) active = lastSung;
+			if (active !== els.lastCaret) {
+				els.lastCaret = active;
+				placeCaret(els, active);
+			}
+		}
+
+		function bandFrame() {
+			bandRaf = 0;
+			var data = bandState.data;
+			if (data === null) return;
+
+			if (bandEls === null || !bandEls.header.isConnected) {
+				if (Date.now() - bandLastTry < 800) return;
+				bandLastTry = Date.now();
+				bandEls = ensureBand();
+			}
+			if (bandEls === null) return;
+
+			// 该不该显示
+			var band = data.band || {};
+			var words = Array.isArray(data.words) ? data.words : [];
+			var on = band.enabled !== false && data.playing === true && words.length > 0;
+			bandEls.band.style.visibility = on ? "visible" : "hidden";
+			bandEls.band.style.opacity = String(typeof band.opacity === "number" ? band.opacity : 0.8);
+			if (!on) {
+				// 不强行收起：纯音乐/暂停时 band 虽然隐藏，但悬浮仍应能控制播放
+				if (data.playing === true) bandRaf = window.requestAnimationFrame(bandFrame);
+				return;
+			}
+
+			var sig = data.lineStart + "|" + words.length;
+			for (var si = 0; si < words.length; si += 1) sig += words[si].t;
+			if (sig !== bandEls.sig) {
+				bandEls.sig = sig;
+				rebuildBandLine(bandEls, words);
+				fitBandLine(bandEls);
+			}
+
+			var at = typeof data.at === "number" ? data.at : Date.now();
+			var now = data.progress + (Date.now() - at) / 1000;
+			paintBand(bandEls, data, now);
+
+			if (data.playing === true) bandRaf = window.requestAnimationFrame(bandFrame);
+		}
+
+		/** 收到新快照：存起来并（必要时）启动渲染循环。 */
+		function pushBandState(data) {
+			bandState.data = data;
+			if (bandEls !== null) bandEls.header.setAttribute("data-dsh-lyric-band", "");
+			if (bandRaf === 0) bandRaf = window.requestAnimationFrame(bandFrame);
+		}
+
+		/** 卸载：停循环、摘节点、清标记。 */
+		function disposeBand() {
+			if (bandRaf !== 0) {
+				window.cancelAnimationFrame(bandRaf);
+				bandRaf = 0;
+			}
+			if (bandEls !== null) {
+				if (bandEls.band.parentElement !== null) bandEls.band.parentElement.removeChild(bandEls.band);
+				bandEls.header.removeAttribute("data-dsh-lyric-band");
+				bandEls.root.removeAttribute("data-dsh-lyric-host");
+				bandEls = null;
+			}
+			bandState.data = null;
+		}
+
+		//#region 设置页
+		/**
+		 * 「设置 → 鲸鱼娘歌词」这一页。
+		 *
+		 * 字段列表由宿主 `/config` 接口给出（`fields`），前端只负责按 `type`
+		 * 渲染控件并回写，所以以后加配置项只改宿主那一处。
+		 *
+		 * 保存后宿主会立刻重建轮询器，不需要重启 DSH。
+		 * @returns {unknown} React 元素。
+		 */
+		function WhalegirlSettings() {
+			var loadedState = react.useState(null);
+			var loaded = loadedState[0];
+			var setLoaded = loadedState[1];
+
+			var draftState = react.useState({});
+			var draft = draftState[0];
+			var setDraft = draftState[1];
+
+			var noteState = react.useState("");
+			var note = noteState[0];
+			var setNote = noteState[1];
+
+			var errorState = react.useState(false);
+			var isError = errorState[0];
+			var setIsError = errorState[1];
+
+			var busyState = react.useState(false);
+			var busy = busyState[0];
+			var setBusy = busyState[1];
+
+			react.useEffect(function () {
+				var alive = true;
+				fetch(CONFIG_API, { cache: "no-store" })
+					.then(function (response) {
+						if (!response.ok) throw new Error("HTTP " + response.status);
+						return response.json();
+					})
+					.then(function (next) {
+						if (!alive) return;
+						setLoaded(next);
+						setDraft(next.values === undefined ? {} : next.values);
+					})
+					.catch(function (cause) {
+						if (alive) {
+							setIsError(true);
+							setNote("读取配置失败：" + String(cause && cause.message ? cause.message : cause));
+						}
+					});
+				return function () {
+					alive = false;
+				};
+			}, []);
+
+			function edit(key, value) {
+				var next = Object.assign({}, draft);
+				next[key] = value;
+				setDraft(next);
+			}
+
+			function save() {
+				setBusy(true);
+				setIsError(false);
+				setNote("保存中…");
+				fetch(CONFIG_API, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ values: draft }),
+				})
+					.then(function (response) {
+						return response.json().then(function (body) {
+							return { ok: response.ok, body };
+						});
+					})
+					.then(function (result) {
+						if (!result.ok || result.body.ok !== true) {
+							throw new Error(result.body.error || "保存失败");
+						}
+						setLoaded({ values: result.body.values, fields: loaded ? loaded.fields : [] });
+						setDraft(result.body.values);
+						setNote("已保存，立即生效");
+					})
+					.catch(function (cause) {
+						setIsError(true);
+						setNote("保存失败：" + String(cause && cause.message ? cause.message : cause));
+					})
+					.then(function () {
+						setBusy(false);
+					});
+			}
+
+			if (loaded === null) {
+				return react.createElement(
+					"div",
+					{ className: "dshWgSet" },
+					react.createElement("div", { className: "dshWgSet_note" }, note || "读取配置中…"),
+				);
+			}
+
+			var fields = Array.isArray(loaded.fields) ? loaded.fields : [];
+			var rows = fields.map(function (field) {
+				var value = draft[field.key];
+
+				if (field.type === "bool") {
+					return react.createElement(
+						"label",
+						{ key: field.key, className: "dshWgSet_check" },
+						react.createElement("input", {
+							type: "checkbox",
+							checked: value === true,
+							onChange: function (event) {
+								edit(field.key, event.target.checked);
+							},
+						}),
+						react.createElement("span", null, field.label),
+					);
+				}
+
+				var inputProps =
+					field.type === "number"
+						? {
+								type: "number",
+								min: field.min,
+								max: field.max,
+								step: field.step,
+								value: value === undefined ? "" : value,
+								onChange: function (event) {
+									var raw = event.target.value;
+									edit(field.key, raw === "" ? "" : Number(raw));
+								},
+						  }
+						: {
+								type: "text",
+								value: value === undefined ? "" : value,
+								onChange: function (event) {
+									edit(field.key, event.target.value);
+								},
+						  };
+
+				return react.createElement(
+					"label",
+					{ key: field.key, className: "dshWgSet_row" },
+					react.createElement("span", { className: "dshWgSet_label" }, field.label),
+					react.createElement(
+						"input",
+						Object.assign({ className: "dshWgSet_input" }, inputProps),
+					),
+					field.hint
+						? react.createElement("span", { className: "dshWgSet_hint" }, field.hint)
+						: null,
+				);
+			});
+
+			return react.createElement(
+				"div",
+				{ className: "dshWgSet" },
+				rows,
+				react.createElement(
+					"div",
+					{ className: "dshWgSet_actions" },
+					react.createElement(
+						"button",
+						{ className: "dshWgSet_btn", disabled: busy, onClick: save },
+						busy ? "保存中…" : "保存",
+					),
+					note
+						? react.createElement(
+								"span",
+								{ className: "dshWgSet_note", "data-error": String(isError) },
+								note,
+						  )
+						: null,
+				),
+			);
+		}
+
 		//#region 主组件
 		/**
 		 * 鲸鱼娘歌词挂件。
@@ -626,6 +1154,14 @@ window.__ModuleLoader__.load({
 			var drag = dragState[0];
 			var setDrag = dragState[1];
 
+			// 歌词关掉后，播放控制浮在标题栏歌词带上方。
+			// 用 ref 拿最新快照，避免 mousemove 监听随每次轮询重绑。
+			var dataRef = react.useRef(null);
+			dataRef.current = data;
+			var transportState = react.useState({ shown: false, left: 0, top: 0 });
+			var transport = transportState[0];
+			var setTransport = transportState[1];
+
 			// 轮询 Host 状态。静态包，浏览器全局可用，因此直接用 fetch。
 			react.useEffect(
 				function () {
@@ -659,6 +1195,83 @@ window.__ModuleLoader__.load({
 				},
 				[],
 			);
+
+			// 背景歌词带：每次拿到新快照就推给它（它自己和 rAF 配合，不会打断动画）
+			react.useEffect(
+				function () {
+					if (data === undefined) return undefined;
+					pushBandState(data);
+					return undefined;
+				},
+				[data],
+			);
+
+			// 组件卸载时把注入的节点摘掉，别在宿主里留垃圾
+			react.useEffect(function () {
+				return function () {
+					disposeBand();
+				};
+			}, []);
+
+			// 悬浮播放控制：鼠标在标题栏歌词带范围内时，把控制条浮到
+			// 歌词文字右侧。位置每次都用 rect 现算，窗口宽度变了也不会错位。
+			react.useEffect(function () {
+				function hide(prev) {
+					return prev.shown ? { shown: false, left: prev.left, top: prev.top } : prev;
+				}
+
+				function onMove(event) {
+					var payload = dataRef.current;
+					// 气泡歌词还开着时，挂件自己有控制条，不重复出现
+					if (!payload || payload.lyricsEnabled !== false) {
+						setTransport(hide);
+						return;
+					}
+					var band = document.querySelector(".dshLyricBand");
+					if (band === null) {
+						setTransport(hide);
+						return;
+					}
+					var rect = band.getBoundingClientRect();
+					if (rect.width <= 0) {
+						setTransport(hide);
+						return;
+					}
+					var inside =
+						event.clientX >= rect.left &&
+						event.clientX <= rect.right &&
+						event.clientY >= rect.top - 6 &&
+						event.clientY <= rect.bottom + 6;
+					if (!inside) {
+						setTransport(hide);
+						return;
+					}
+					// 贴着歌词文字右侧；放不下就贴右，并给宿主右上角按钮留出余量
+					var width = 118;
+					var maxLeft = rect.right - width - 12;
+					var left = maxLeft;
+					var line = band.querySelector(".dshLyricBand__line");
+					if (line !== null) left = line.getBoundingClientRect().right + 10;
+					if (left > maxLeft) left = maxLeft;
+					if (left < rect.left + 12) left = rect.left + 12;
+					var top = rect.top + rect.height / 2 - 17;
+					setTransport(function (prev) {
+						if (
+							prev.shown &&
+							Math.abs(prev.left - left) < 1 &&
+							Math.abs(prev.top - top) < 1
+						) {
+							return prev;
+						}
+						return { shown: true, left: left, top: top };
+					});
+				}
+
+				document.addEventListener("mousemove", onMove, { passive: true });
+				return function () {
+					document.removeEventListener("mousemove", onMove);
+				};
+			}, []);
 
 			// 多窗口同步收起/折叠/位置
 			react.useEffect(function () {
@@ -782,6 +1395,49 @@ window.__ModuleLoader__.load({
 				setCollapsed(false);
 			}
 
+			// 关掉「气泡里显示歌词」→ 整个挂件不显示；
+			// 播放控制浮到标题栏歌词带上方（走 overlay 层，可点击）。
+			// 例外：背景带也关了的话就没有任何控制入口了，此时保留挂件本体。
+			var bandOn = !(data && data.band && data.band.enabled === false);
+			if (data && data.lyricsEnabled === false && bandOn) {
+				if (!transport.shown) return null;
+				var transportButton = function (key, title, icon, action) {
+					return react.createElement(
+						"button",
+						{
+							key: key,
+							className: "dshWg_transportBtn",
+							title: title,
+							"aria-label": title,
+							disabled: busy,
+							onMouseDown: function (event) {
+								event.stopPropagation();
+							},
+							onClick: function (event) {
+								event.stopPropagation();
+								onControl(action);
+							},
+						},
+						icon,
+					);
+				};
+				return react.createElement(
+					"div",
+					{
+						className: "dshWg_transport",
+						style: { left: transport.left + "px", top: transport.top + "px" },
+					},
+					transportButton("prev", "上一曲", react.createElement(IconPrev), "prev"),
+					transportButton(
+						"toggle",
+						data.playing ? "暂停" : "播放",
+						data.playing ? react.createElement(IconPause) : react.createElement(IconPlay),
+						"toggle",
+					),
+					transportButton("next", "下一曲", react.createElement(IconNext), "next"),
+				);
+			}
+
 			if (collapsed) {
 				return react.createElement(
 					"div",
@@ -803,12 +1459,17 @@ window.__ModuleLoader__.load({
 							}
 						},
 					},
-					react.createElement(
-						"div",
-						{ className: "dshWg_dockText" },
-						data && data.lyric ? data.lyric : "鲸鱼娘歌词",
-					),
-					react.createElement("div", { className: "dshWg_dockDot" }),
+					// 歌词关闭时，隐藏态只留头像，不再显示占位文字
+					data && data.lyricsEnabled !== false
+						? react.createElement(
+								"div",
+								{ className: "dshWg_dockText" },
+								data.lyric ? data.lyric : "鲸鱼娘歌词",
+						  )
+						: null,
+					data && data.lyricsEnabled !== false
+						? react.createElement("div", { className: "dshWg_dockDot" })
+						: null,
 					// 与展开态保持一致：文字在左，头像在右
 					react.createElement("div", {
 						className: "dshWg_dockFace",
@@ -937,6 +1598,26 @@ window.__ModuleLoader__.load({
 						} catch (error) {
 							// 外壳不提供该座位时安静降级，绝不把整个 GUI 拖下水
 							console.error("[" + NS + "] shell.overlay 注册失败", error);
+							return function () {};
+						}
+					}),
+				);
+
+				// 设置 → 鲸鱼娘歌词：把宿主的配置项做成表单
+				disposers.push(
+					ctx.slots.inject("settings.section", function () {
+						try {
+							return ctx.slots.register(
+								{
+									name: "settings.section",
+									id: NS,
+									order: 80,
+									label: "鲸鱼娘歌词",
+								},
+								withSlotKey(WhalegirlSettings),
+							);
+						} catch (error) {
+							console.error("[" + NS + "] settings.section 注册失败", error);
 							return function () {};
 						}
 					}),

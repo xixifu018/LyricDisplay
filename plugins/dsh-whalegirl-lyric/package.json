@@ -1,7 +1,7 @@
 {
   "name": "dsh-whalegirl-lyric",
-  "version": "1.0.0",
-  "description": "DSH Web GUI 插件：鲸鱼娘形象 + 洛雪音乐歌词气泡，支持播放控制与 SSE 即时同步。",
+  "version": "1.1.0",
+  "description": "DSH Web GUI 插件：鲸鱼娘形象 + 洛雪音乐歌词气泡，支持会话标题栏逐字歌词带、播放控制与 SSE 即时同步。",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

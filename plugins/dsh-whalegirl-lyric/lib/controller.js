@@ -5,12 +5,25 @@
  * 歌词在切歌时抓取一次并解析成有序行，之后每帧只做二分查找。
  */
 
-import { currentAndNext, parseLrc } from './lrc.js'
+import { currentAndNext, parseAwlrc, parseLrc } from './lrc.js'
 
 /** 默认轮询间隔（毫秒）；可被配置项 pollIntervalMs 覆盖。 */
 const DEFAULT_POLL_INTERVAL_MS = 500
 /** SSE 断线后的重连间隔（毫秒）。 */
 const SSE_RETRY_MS = 2000
+/**
+ * 空歌词的重试次数上限（约 10 秒，按 500ms 轮询算）。
+ *
+ * ⚠️ 洛雪切歌时 `/status` 先变、`/lyric-all` 后变，此时**连 `lyricLineText` 都是空的**，
+ * 不能拿它当"这首歌没歌词"的依据 —— 曾经就是这么误判的（`empty && lyricLineText`
+ * 才重试）：切歌后第一次取到空 → 被当成"这首没歌词"缓存 → 整首歌都没歌词。
+ * 所以只要解析出 0 行就重试，直到上限。
+ */
+const LYRIC_RETRY_LIMIT = 20
+/** 放弃后若洛雪又出现了"新的当前行"，隔多久再补救一次（毫秒）。 */
+const LYRIC_RECHECK_MS = 6000
+/** 补救次数上限（防止对真正无歌词的歌无限请求）。 */
+const LYRIC_RECHECK_LIMIT = 10
 /** 状态里必须是数字的字段：SSE 可能把它们推成字符串，统一在此收敛类型。 */
 const NUMERIC_FIELDS = new Set(['duration', 'progress', 'playbackRate'])
 
@@ -113,6 +126,22 @@ export class PlayerController {
     this.lyricLines = []
     this.lyricName = ''
     this.lyricPending = false
+    /** 当前这首歌已重试了几次（切歌时归零）。 */
+    this.lyricAttempts = 0
+    /** 正在重试的歌名（用来判断"换歌了要归零计数"）。 */
+    this.attemptName = ''
+    /** 上一次**成功接受**的歌词属于哪首歌，用来识别"取到上一首"的残留。 */
+    this.acceptedName = ''
+    this.acceptedText = ''
+    /** 放弃时的 `lyricLineText`：用它判断"后来是不是真的换出了新行"。 */
+    this.acceptedLineText = ''
+    /** 放弃后的补救次数与上次时间。 */
+    this.emptyRechecks = 0
+    /** 最近一次取回的歌词原文长度（诊断：区分"取不到"和"解析不出"）。 */
+    this.lyricRawLen = -1
+    /** 当前歌词是否带字级时间（决定客户端能不能做逐字/气泡）。 */
+    this.lyricWordLevel = false
+    this.lastRecheckAt = 0
     this.reachable = false
     this.lastError = ''
     this.localProgress = 0
@@ -172,6 +201,45 @@ export class PlayerController {
   }
 
   /**
+   * 取当前行的字级时间；没有音节信息时按字符均分。
+   * @param {{ text: string, time: number, end: number, syllables?: {start:number,end:number,text:string}[] }|undefined} line - 当前行。
+   * @returns {{ s: number, e: number, t: string }[]} 字/词时间列表。
+   */
+  /**
+   * 两轨（plain LRC 与 AWLRC）是否指向同一份歌词。
+   *
+   * 判据：行数接近 + 前几行时间戳一致。切歌瞬间 /lyric-all 的
+   * lyric 可能是新歌、lxlyric 还是上一首，此时时间戳必然对不上。
+   * @param {{time:number}[]} plainLines - lyric 解析结果。
+   * @param {{time:number}[]} awLines - lxlyric 解析结果。
+   * @returns {boolean} 是否可以安全地用 lxlyric 当声源。
+   */
+  _sameTiming(plainLines, awLines) {
+    if (plainLines.length === 0 || awLines.length === 0) return false;
+    const tolerance = Math.max(3, Math.round(plainLines.length * 0.2));
+    if (Math.abs(plainLines.length - awLines.length) > tolerance) return false;
+    const n = Math.min(4, plainLines.length, awLines.length);
+    for (let i = 0; i < n; i += 1) {
+      if (Math.abs(plainLines[i].time - awLines[i].time) > 0.08) return false;
+    }
+    return true;
+  }
+
+  _wordsFor(line) {
+    if (!line) return [];
+    if (Array.isArray(line.syllables) && line.syllables.length > 0) {
+      return line.syllables.map((s) => ({ s: s.start, e: s.end, t: s.text }));
+    }
+    const text = typeof line.text === 'string' ? line.text : '';
+    const chars = Array.from(text);
+    if (chars.length === 0) return [];
+    const from = Number.isFinite(line.time) ? line.time : 0;
+    const to = Number.isFinite(line.end) && line.end > from ? line.end : from + chars.length * 0.3;
+    const step = (to - from) / chars.length;
+    return chars.map((ch, i) => ({ s: from + step * i, e: from + step * (i + 1), t: ch }));
+  }
+
+  /**
    * 当前完整状态快照，供浏览器侧渲染。
    * @returns {object} 状态快照。
    */
@@ -200,6 +268,27 @@ export class PlayerController {
       lyricReady: hasLyric,
       lyricIndex: index,
       lyricCount: this.lyricLines.length,
+      // ---- 逐字歌词带用的字段 ----
+      // 当前行的字级时间（绝对秒）：客户端据此在本地按帧插值，不必每帧问宿主。
+      // 没有字级时间（普通 LRC）时退化为"按字符均分整行时长"，
+      // 这样背景歌词带仍然能逐字亮起，只是节奏不如 AWLRC 准。
+      words: this._wordsFor(line),
+      lineStart: line?.time ?? 0,
+      lineEnd: line?.end ?? 0,
+      wordLevel: this.lyricWordLevel,
+      // 气泡是否显示歌词（关掉时背景带仍然工作，两者独立）
+      lyricsEnabled: this.config.lyrics !== false,
+      band: {
+        enabled: this.config.band !== false,
+        opacity: Number.isFinite(this.config.bandOpacity) ? this.config.bandOpacity : 0.8,
+      },
+      // 诊断用：确认宿主跑的是哪一版取词逻辑（客户端会忽略未知字段）
+      lyricRevision: 2,
+      lyricAttempts: this.lyricAttempts,
+      lyricName: this.lyricName,
+      // 最近一次取回的原文长度：>0 但 lyricCount=0 说明是**解析**问题，
+      // =0 说明是**取不到**（洛雪那边还没就绪）。
+      lyricRawLen: this.lyricRawLen,
       at: Date.now(),
     }
   }
@@ -293,6 +382,35 @@ export class PlayerController {
     this.lastError = ''
 
     if (this.raw.name !== '' && this.raw.name !== this.lyricName) {
+      // 换歌了：先清掉上一首的歌词，避免新歌词就绪前把旧的当成新歌显示
+      this.lyricLines = []
+      // 重试计数归零，然后尝试取歌词。
+      // 失败（空/上一首）时 `loadLyric` 不会写 `lyricName`，
+      // 于是下一轮轮询会再调一次 —— 这就是重试机制本身。
+      if (this.attemptName !== this.raw.name) {
+        this.attemptName = this.raw.name
+        this.lyricAttempts = 0
+        this.emptyRechecks = 0
+        this.acceptedLineText = ''
+      }
+      void this.loadLyric(this.raw.name)
+      return
+    }
+
+    // 晚到补救：已经判定"这首没歌词"，但洛雪后来又换出了**新的**当前行
+    // （说明歌词其实到了），隔段时间再试一次。用 `acceptedLineText` 比对，
+    // 真正的纯音乐（行文本一直是同一句，如"纯音乐，请欣赏"）不会触发。
+    if (
+      this.raw.name !== ''
+      && this.lyricLines.length === 0
+      && this.raw.lyricLineText.trim() !== ''
+      && this.raw.lyricLineText !== this.acceptedLineText
+      && this.emptyRechecks < LYRIC_RECHECK_LIMIT
+      && Date.now() - this.lastRecheckAt >= LYRIC_RECHECK_MS
+    ) {
+      this.emptyRechecks += 1
+      this.lastRecheckAt = Date.now()
+      this.lyricAttempts = 0
       void this.loadLyric(this.raw.name)
     }
   }
@@ -377,18 +495,27 @@ export class PlayerController {
    * @param {string} name - 歌曲名，用于防止乱序覆盖。
    */
   async loadLyric(name) {
-    if (!this.config.lyrics || this.lyricPending) return
+    // ⚠️ 只要**任一**消费者需要歌词就要取：
+    //   - `lyrics`  → 气泡里那句
+    //   - `band`    → 标题栏背景歌词带（要逐字时间）
+    // 以前只判断 `lyrics`，于是关掉"气泡里显示歌词"时背景带也跟着消失（踩过）。
+    const wantBubble = this.config.lyrics !== false
+    const wantBand = this.config.band !== false
+    if ((!wantBubble && !wantBand) || this.lyricPending) return
     this.lyricPending = true
     try {
       const wantTranslation = this.config.translation === true
       let text = ''
       let transText = ''
+      let awlrc = ''
 
       if (wantTranslation) {
         const response = await this.request('/lyric-all')
         const payload = await response.json()
         text = typeof payload.lyric === 'string' ? payload.lyric : ''
         transText = typeof payload.tlyric === 'string' ? payload.tlyric : ''
+        // 逐字轨：有它才能做字级高亮/气泡
+        awlrc = typeof payload.lxlyric === 'string' ? payload.lxlyric : ''
         if (text === '') {
           // `/lyric-all` 没给原文时退回 `/lyric`，避免整首歌没歌词
           const fallback = await this.request('/lyric')
@@ -401,12 +528,56 @@ export class PlayerController {
 
       if (this.raw.name !== name) return  // 期间又切歌了，丢弃
 
-      const baseLines = parseLrc(text)
+      this.lyricRawLen = text.length
+      // 优先逐字轨：只有它能给出每个字的起止时间。
+      //
+      // ⚠️ **必须校验两轨是否属于同一首歌**。实测切歌瞬间 `/lyric-all` 的
+      //    `lyric` 与 `lxlyric` 会短暂不同步：前者已是新歌、后者还是上一首。
+      //    只拿 `lyric` 判归属的话，就会把**上一首的逐字轨**当成新歌的缓存下来
+      //    —— 表现为"切歌后歌词还是上一首的"（真实踩过）。
+      const plainLines = parseLrc(text)
+      const awlrcLines = parseAwlrc(awlrc)
+      const awUsable = awlrcLines.length > 0 && this._sameTiming(plainLines, awlrcLines)
+      const inconsistent = awlrcLines.length > 0 && plainLines.length > 0 && !awUsable
+      this.lyricWordLevel = awUsable
+      const baseLines = awUsable ? awlrcLines : plainLines
       const lines = transText.trim() === ''
         ? mergeTranslation(baseLines, [])
         : mergeTranslation(baseLines, parseLrc(transText))
+      if (awUsable) {
+        // mergeTranslation 会复制对象，音节字段要保留
+        for (let i = 0; i < lines.length; i += 1) lines[i].syllables = baseLines[i].syllables
+      }
+
+      // ⚠️ 三种"还不能用"的结果，都不能写 `lyricName`（写了就再也不重取）：
+      //   - 解析出 0 行：切歌瞬间 `/lyric-all` 常常还是空的，
+      //     **此时 `lyricLineText` 往往也是空的**，所以不能拿它当"没歌词"的依据
+      //   - 取到的原文与上一次**成功接受**的那首一字不差（= 还是上一首的残留）
+      //   - 两轨时间轴对不上（= `lxlyric` 还是上一首的）
+      const empty = lines.length === 0
+      const stale = !empty && text !== ''
+        && text === this.acceptedText && name !== this.acceptedName
+      if ((empty || stale || inconsistent) && this.lyricAttempts < LYRIC_RETRY_LIMIT) {
+        this.lyricAttempts += 1
+        return
+      }
+      if (empty || stale) {
+        // 重试用尽：接受"没有歌词"（残留则丢掉，宁可没有也不显示错的）
+        this.lyricLines = []
+        this.lyricName = name
+        this.acceptedLineText = this.raw.lyricLineText
+        return
+      }
+      // 走这里有两种情况：完全正常；或"两轨对不上但重试用尽"——
+      // 后者已经在上面退回 `plainLines`，所以显示的是正确的歌词，只是没有逐字时间。
+
       this.lyricLines = lines
       this.lyricName = name
+      this.lyricAttempts = 0
+      this.emptyRechecks = 0
+      this.acceptedName = name
+      this.acceptedText = text
+      this.acceptedLineText = this.raw.lyricLineText
     } catch (error) {
       this.lastError = String(error?.message ?? error)
     } finally {

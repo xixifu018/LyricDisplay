@@ -10,6 +10,65 @@ const TIME_TAG_RE = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g
 /** 元数据标签：[ar:xxx] [ti:xxx] [offset:xxx] 等 */
 const META_TAG_RE = /^\[([a-zA-Z]+):(.+)\]$/
 
+/** AWLRC 行：[mm:ss.xxx]<偏移ms,时长ms>字... */
+const AWLRC_LINE_RE = /^\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\](.*)$/
+/** AWLRC 音节：<相对行首偏移ms,时长ms[,忽略]>文字（文字必须非空，否则会出零宽幽灵音节） */
+const AWLRC_WORD_RE = /<(\d+),(\d+)(?:,\d+)?>([^<]+)/g
+
+/**
+ * 解析 AWLRC（洛雪 `lxlyric`，逐字歌词）。
+ *
+ * 格式：`[mm:ss.xxx]<相对行首偏移ms,时长ms>字<偏移ms,时长ms>字...`
+ * 偏移是**相对行首**的毫秒数，不是绝对时间；切分粒度由上游决定
+ * （中文按单字、拉丁文按整词）。
+ *
+ * @param {string} text - 原始 AWLRC。
+ * @returns {{ time: number, end: number, text: string,
+ *             syllables: { start: number, end: number, text: string }[] }[]} 行数组。
+ */
+export function parseAwlrc(text) {
+  const lines = []
+  if (typeof text !== 'string' || text === '') return lines
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line === '' || META_TAG_RE.test(line)) continue
+    const head = AWLRC_LINE_RE.exec(line)
+    if (head === null) continue
+
+    const fracStr = head[3] ?? '0'
+    const frac = Number.parseInt(fracStr, 10) / 10 ** fracStr.length
+    const lineTime = Number.parseInt(head[1], 10) * 60 + Number.parseInt(head[2], 10) + frac
+    const body = head[4]
+
+    const syllables = []
+    let cursorMs = 0
+    AWLRC_WORD_RE.lastIndex = 0
+    for (const m of body.matchAll(AWLRC_WORD_RE)) {
+      const offMs = Math.max(Number.parseInt(m[1], 10), cursorMs)
+      const durMs = Math.max(Number.parseInt(m[2], 10), 0)
+      const start = lineTime + offMs / 1000
+      syllables.push({ start, end: start + durMs / 1000, text: m[3] })
+      cursorMs = offMs + durMs
+    }
+    if (syllables.length === 0) continue
+
+    lines.push({
+      time: lineTime,
+      end: syllables[syllables.length - 1].end,
+      text: syllables.map((s) => s.text).join(''),
+      syllables,
+    })
+  }
+
+  lines.sort((a, b) => a.time - b.time)
+  // 行结束时间取"下一行开始"，最后一行保留自身
+  for (let i = 0; i < lines.length; i += 1) {
+    if (i + 1 < lines.length) lines[i].end = lines[i + 1].time
+  }
+  return lines
+}
+
 /**
  * 解析 LRC 文本。
  * @param {string} text - 原始 LRC 歌词。
